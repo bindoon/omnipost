@@ -1,0 +1,49 @@
+{
+  "name": "omnipost",
+  "version": "0.1.0",
+  "description": "Local Chrome extension and CLI that drafts articles and videos to WeChat, Xiaohongshu, X, Channels, and Douyin.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "omnipost": "./cli.mjs"
+  },
+  "files": [
+    "cli.mjs",
+    "build.mjs",
+    "bridge",
+    "extension",
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bindoon/omnipost.git"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "preview": "vite --config vite.config.mjs",
+    "format": "prettier --write extension bridge test cli.mjs build.mjs vite.config.mjs README.md docs",
+    "format:check": "prettier --check extension bridge test cli.mjs build.mjs vite.config.mjs README.md docs"
+  },
+  "dependencies": {
+    "linkedom": "^0.18.15",
+    "marked": "^15.0.12",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "prettier": "^3.9.10",
+    "vite": "^6.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

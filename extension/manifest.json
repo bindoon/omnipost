@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "name": "Omnipost",
+  "version": "0.1.0",
+  "description": "导入文章与视频，适配微信公众号、小红书、X、视频号和抖音，推送草稿并继续编辑。支持本地 AI CLI。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms",
+    "unlimitedStorage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://mp.weixin.qq.com/*",
+    "https://creator.xiaohongshu.com/*",
+    "https://x.com/*",
+    "https://channels.weixin.qq.com/*",
+    "https://creator.douyin.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "side_panel": { "default_path": "panel.html" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "打开发布工作台" },
+  "options_page": "workbench.html"
+}
