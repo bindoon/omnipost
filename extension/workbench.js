@@ -10,6 +10,7 @@ import {
 } from "./shared/model.js";
 import { put, get } from "./shared/storage.js";
 import { extractTitle, renderArticle, imagePaths } from "./shared/content.js";
+import { copyWechatArticle, copyArticleTitle } from "./shared/clipboard.js";
 const extension = Boolean(globalThis.chrome?.runtime?.id);
 const app = document.querySelector("#app");
 const urls = new Map();
@@ -25,14 +26,14 @@ function currentView() {
   if (!currentTarget?.platform) return "";
   const p = currentTarget.platform;
   const choices = jobs.filter(
-    (j) => j.kind === "video" && j.platforms.includes(p),
+    (j) => j.kind === (p === "wechat" ? "article" : "video"),
   );
-  return `<section class="panel" style="margin-bottom:24px" aria-label="当前页面填充"><div class="panel-body"><h2>填入刚才的${esc(PLATFORMS[p].name)}页面</h2><p>选择一份素材，上传视频并填入文案。原页面已有内容时停止。所有平台仅准备草稿，检查封面和内容后，由你亲自提交发布。</p>${
+  return `<section class="panel" style="margin-bottom:24px" aria-label="当前页面填充"><div class="panel-body"><h2>填入刚才的${esc(PLATFORMS[p].name)}页面</h2><p>选择一份内容，填入正文或上传视频。原页面已有内容时停止。所有平台仅准备草稿，检查封面和内容后，由你亲自提交发布。</p>${
     choices.length
       ? choices
           .map(
             (j) =>
-              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong><p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${j.results[p]?.state !== "ready" ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
+              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong><p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${currentTarget.role !== "editor" || ![undefined, "ready", "queued", "failed", ...(p === "wechat" || isAssist(p) ? ["needs_attention"] : [])].includes(j.results[p]?.state) ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
                 .filter((a) => a.role.startsWith("cover"))
                 .map(
                   (a) =>
@@ -41,7 +42,7 @@ function currentView() {
                 .join("")}</div></div>`,
           )
           .join("")
-      : "<p>还没有此平台的视频素材。请用 CLI 的 --stage 交接任务。</p>"
+      : "<p>还没有此平台可填充的内容。请用 CLI 的 --stage 交接任务。</p>"
   }</div></section>`;
 }
 const seed = {
@@ -131,6 +132,9 @@ function coverAsset(job) {
     null
   );
 }
+function articleCopyButtons(id = "current") {
+  return `<div class="article-copy"><p>手动粘贴到公众号：正文保留排版，标题单独复制。</p><div class="job-actions"><button class="quiet" data-copy-article="${esc(id)}" data-copy-mode="title">复制标题</button><button class="primary" data-copy-article="${esc(id)}" data-copy-mode="body">复制微信正文</button><button class="quiet" data-copy-article="${esc(id)}" data-copy-mode="no-images">复制微信正文（无图）</button></div><p role="status" aria-live="polite"></p></div>`;
+}
 function contentCard(j) {
   const ids = [
     ...j.platforms,
@@ -162,12 +166,17 @@ function contentCard(j) {
       return `<div class="sync-row"><div><span class="job-platform">${badge(p)} ${esc(PLATFORMS[p].name)}</span><span class="pill ${done ? "success" : attention ? "warn" : ""}">${labels[r.state] || esc(r.state)}</span><p>${esc(r.message || "")}</p></div>${action}</div>`;
     })
     .join("");
-  return `<article class="content-card"><div class="card-head"><h2>${esc(j.title)}</h2><button class="quiet danger" data-delete="${esc(j.id)}">删除</button></div><p class="saved">${j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : ""}</p><div class="draft-preview" data-preview-for="${esc(j.id)}"></div><div class="sync-row" style="border-top:0;padding-top:0"><div><p>视频打不开时这里显示封面，方便辨认。</p></div><button class="quiet" data-history="${esc(j.id)}">查看内容</button></div>${rows}</article>`;
+  const controls = `${j.kind === "article" ? articleCopyButtons(j.id) : `<div class="draft-preview" data-preview-for="${esc(j.id)}"></div>`}<div class="sync-row" style="border-top:0;padding-top:0"><div><p>${j.kind === "article" ? "自动填充失败时，可以复制正文到公众号编辑器。" : "视频打不开时这里显示封面，方便辨认。"}</p></div><button class="quiet" data-history="${esc(j.id)}">查看内容</button></div>${rows}`;
+  const body =
+    j.kind === "article"
+      ? `<div class="article-card-layout"><div class="article-controls">${controls}</div><aside class="article-preview" aria-label="文章预览"><div class="article-preview-label">文章预览 <span>公众号排版</span></div><div class="phone"><div class="phone-bar"><span>‹</span><strong>微信公众号</strong><span>•••</span></div><div class="phone-content" data-article-preview="${esc(j.id)}" tabindex="0" role="region" aria-label="文章正文预览"></div></div><p class="preview-foot">可滚动查看全文 · 最终样式以平台编辑器为准</p></aside></div>`
+      : controls;
+  return `<article class="content-card"><div class="card-head"><h2>${esc(j.title)}</h2><button class="quiet danger" data-delete="${esc(j.id)}">删除</button></div><p class="saved">${j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : ""}</p>${body}</article>`;
 }
 function libraryMain() {
   const kind = state.libraryKind === "article" ? "article" : "video";
   const list = jobs.filter((j) => j.kind === kind);
-  return `<main class="library"><div class="library-head"><div class="segmented" role="tablist" aria-label="内容类型"><button role="tab" data-library="video" aria-selected="${kind === "video"}" class="${kind === "video" ? "active" : ""}">视频</button><button role="tab" data-library="article" aria-selected="${kind === "article"}" class="${kind === "article" ? "active" : ""}">文章</button></div><button class="primary" data-action="compose">导入新内容</button></div>${
+  return `<main class="library ${kind === "article" ? "library-articles" : ""}">${currentView()}<div class="library-head"><div class="segmented" role="tablist" aria-label="内容类型"><button role="tab" data-library="video" aria-selected="${kind === "video"}" class="${kind === "video" ? "active" : ""}">视频</button><button role="tab" data-library="article" aria-selected="${kind === "article"}" class="${kind === "article" ? "active" : ""}">文章</button></div><button class="primary" data-action="compose">导入新内容</button></div>${
     list.length
       ? list.map(contentCard).join("")
       : `<p class="library-empty">${kind === "video" ? "还没有视频。" : "还没有文章。"}导入一份，或让 AI 交接到这里。每条内容下面是各平台的同步状态。</p>`
@@ -191,7 +200,7 @@ function render() {
       )
       .join(
         "",
-      )}</div><div class="phone"><div class="phone-bar"><span>‹</span><strong>${PLATFORMS[state.previewPlatform]?.name || "内容预览"}</strong><span>•••</span></div><div class="phone-content" id="platform-preview"></div></div><div class="preview-foot">最终样式以平台编辑器为准 · 原文始终保留</div></div></section><section class="ai-note"><h3>${icon("spark")} 也可以交给 AI</h3><p>Agent 通过本地 CLI 推送草稿，再把编辑入口交还给你。</p><code class="code">omnipost draft article.md<br>--platforms wechat,xiaohongshu,x</code></section></aside></div><div id="job-history">${historyView()}</div><p class="bottom-note">一份内容，几处草稿。打开平台，再做一点自己的调整。</p></main>${settingsView()}<input hidden id="files" type="file" accept=".md,.markdown,image/*,video/*" multiple><input hidden id="folder" type="file" webkitdirectory multiple>`;
+      )}</div><div class="phone"><div class="phone-bar"><span>‹</span><strong>${PLATFORMS[state.previewPlatform]?.name || "内容预览"}</strong><span>•••</span></div><div class="phone-content" id="platform-preview"></div></div>${state.kind === "article" ? articleCopyButtons() : ""}<div class="preview-foot">最终样式以平台编辑器为准 · 原文始终保留</div></div></section><section class="ai-note"><h3>${icon("spark")} 也可以交给 AI</h3><p>Agent 通过本地 CLI 推送草稿，再把编辑入口交还给你。</p><code class="code">omnipost draft article.md<br>--platforms wechat,xiaohongshu,x</code></section></aside></div><div id="job-history">${historyView()}</div><p class="bottom-note">一份内容，几处草稿。打开平台，再做一点自己的调整。</p></main>${settingsView()}<input hidden id="files" type="file" accept=".md,.markdown,image/*,video/*" multiple><input hidden id="folder" type="file" webkitdirectory multiple>`;
   renderPreview();
   bindFiles();
 }
@@ -514,6 +523,47 @@ app.addEventListener("click", async (e) => {
   if (!b) return;
   try {
     error = "";
+    if (b.dataset.copyArticle) {
+      const item =
+        b.dataset.copyArticle === "current"
+          ? state
+          : jobs.find((j) => j.id === b.dataset.copyArticle);
+      if (!item || item.kind !== "article") throw new Error("文章不存在");
+      const status = b
+        .closest(".article-copy")
+        .querySelector('[role="status"]');
+      b.disabled = true;
+      status.textContent = "正在准备复制…";
+      try {
+        if (b.dataset.copyMode === "title") {
+          await copyArticleTitle(item);
+          status.textContent = "已复制标题，请粘贴到公众号标题栏。";
+        } else {
+          const images = b.dataset.copyMode !== "no-images";
+          await copyWechatArticle(item, {
+            images,
+            readAsset: async (asset) => {
+              const local = await get("assets", asset.id);
+              if (local) return local;
+              const stored = jobs.find((j) => j.id === item.jobId) || item;
+              const r = await send("UI_ASSET", {
+                id: stored.id,
+                assetId: asset.id,
+              });
+              return blobFromChunks(r.chunks, asset.type);
+            },
+          });
+          status.textContent = images
+            ? "已复制微信正文（保留排版），请粘贴到公众号正文并核对配图；若图片未接收，请用无图版本并上传原图。"
+            : "已复制无图正文（保留排版），请粘贴后在对应段落上传配图。";
+        }
+      } catch (e) {
+        status.textContent = e.message;
+      } finally {
+        b.disabled = false;
+      }
+      return;
+    }
     if (b.dataset.delete) {
       if (b.dataset.armed !== "1") {
         b.dataset.armed = "1";
@@ -761,9 +811,54 @@ async function mediaUrl(job, asset) {
   return url;
 }
 let previewToken = 0;
+async function mountArticlePreview(el, token) {
+  const job = jobs.find((j) => j.id === el.dataset.articlePreview);
+  if (!job) return;
+  try {
+    const html = job.markdown
+      ? renderArticle(job.markdown, job.assets || []).wechat
+      : job.prepared?.wechat;
+    if (!html) throw new Error("暂无正文，请点击「查看内容」补充文章。");
+    // Keep unresolved extension asset URLs out of the live DOM while loading images.
+    const body = document.createElement("div");
+    body.innerHTML = html;
+    const images = [...body.querySelectorAll("img")].map((img) => {
+      const id =
+        img.getAttribute("data-asset-id") ||
+        img.getAttribute("src")?.replace(/^publisher-asset:/, "");
+      img.removeAttribute("src");
+      return { img, asset: job.assets?.find((asset) => asset.id === id) };
+    });
+    const title = document.createElement("h1");
+    title.textContent = job.overrides?.wechat?.title ?? job.title;
+    el.replaceChildren(title, ...body.childNodes);
+    for (const { img, asset } of images) {
+      let url = "";
+      try {
+        if (asset) url = await mediaUrl(job, asset);
+      } catch {}
+      if (token !== previewToken) return;
+      if (url) img.src = url;
+      else {
+        const note = document.createElement("p");
+        note.className = "article-image-missing";
+        note.textContent =
+          "配图暂不可预览：" + (img.alt || asset?.name || "图片");
+        img.replaceWith(note);
+      }
+    }
+  } catch (error) {
+    el.textContent = error.message;
+  }
+}
 async function mountPreviews() {
-  if (!extension) return;
   const token = ++previewToken;
+  await Promise.all(
+    [...document.querySelectorAll("[data-article-preview]")].map((el) =>
+      mountArticlePreview(el, token),
+    ),
+  );
+  if (!extension || token !== previewToken) return;
   for (const el of document.querySelectorAll("[data-preview-for]")) {
     if (token !== previewToken) return;
     const job = jobs.find((j) => j.id === el.dataset.previewFor);

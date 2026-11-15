@@ -66,16 +66,14 @@ test("目标限定原发布页，拒绝同域其他页、伪造域名与重复�
     "panel",
   );
   assert.equal(
-    target.surfaceFor(
-      "https://channels.weixin.qq.com/platform/post/create",
-    ),
+    target.surfaceFor("https://channels.weixin.qq.com/platform/post/create"),
     "panel",
   );
   assert.equal(
     target.surfaceFor("https://creator.douyin.com/creator-micro/home"),
     "panel",
   );
-  assert.equal(target.surfaceFor("https://mp.weixin.qq.com/"), "workbench");
+  assert.equal(target.surfaceFor("https://mp.weixin.qq.com/"), "panel");
   assert.equal(target.surfaceFor("https://example.com/"), "workbench");
 });
 test("素材交接不建平台页；点击插件保留标签；填充用原页并保持只填充", async () => {
@@ -84,7 +82,9 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     injected = [],
     messages = [];
   let listener, clicked;
-  const side = [];
+  const side = [],
+    updated = [];
+  let pageUrl = "https://x.com/compose/post";
   const chrome = {
     runtime: {
       id: "ext",
@@ -96,7 +96,7 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
       onUpdated: { addListener() {} },
       get: async (id) => ({
         id,
-        url: "https://x.com/compose/post",
+        url: pageUrl,
         status: "complete",
         windowId: 1,
       }),
@@ -104,8 +104,8 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
         created.push(o);
         return { id: 99, ...o };
       },
-      update: async () => {},
-      query: async () => [],
+      update: async (id, options) => updated.push({ id, ...options }),
+      query: async () => [{ id: 42, url: pageUrl }],
       sendMessage: async (id, m) => {
         messages.push({ id, m });
         return {
@@ -140,6 +140,7 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     chrome,
     console,
     URL,
+    URLSearchParams,
     Map,
     Promise,
     Date,
@@ -219,4 +220,100 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
   await clicked({ id: 7, url: "https://example.com/" });
   assert.match(created[0].url, /workbench\.html$/);
   assert.doesNotMatch(created[0].url, /targetTab/);
+  for (
+    let i = 0;
+    i < 20 && jobs.get("staged-video").results.x.state !== "needs_attention";
+    i++
+  )
+    await new Promise(setImmediate);
+  pageUrl =
+    "https://mp.weixin.qq.com/cgi-bin/appmsg?action=list_card&type=77&token=current-token";
+  await clicked({ id: 42, url: pageUrl });
+  assert.equal(side.at(-1).open, 42);
+  const navigation = await send({
+    type: "OPEN_PLATFORM",
+    platform: "wechat",
+    kind: "article",
+    tabId: 42,
+  });
+  assert.equal(navigation.ok, true);
+  assert.equal(new URL(updated.at(-1).url).searchParams.get("type"), "10");
+  assert.equal(
+    new URL(updated.at(-1).url).searchParams.get("token"),
+    "current-token",
+  );
+  const createdBeforeWechat = created.length;
+  const article = model.validateTask({
+    id: "staged-wx",
+    kind: "article",
+    title: "公众号文章",
+    markdown: "正文",
+    platforms: ["wechat"],
+    delivery: "manual",
+    assets: [],
+    prepared: { wechat: "<p>正文</p>", media: [] },
+  });
+  assert.equal((await send({ type: "START", task: article })).ok, true);
+  for (
+    let i = 0;
+    i < 20 && jobs.get(article.id)?.results.wechat.state !== "ready";
+    i++
+  )
+    await new Promise(setImmediate);
+  pageUrl = target.editorUrl("wechat", "article", pageUrl);
+  assert.equal(
+    (await send({ type: "FILL_CURRENT", id: article.id, tabId: 42 })).ok,
+    true,
+  );
+  for (let i = 0; i < 20 && messages.length < 2; i++)
+    await new Promise(setImmediate);
+  assert.equal(created.length, createdBeforeWechat);
+  assert.equal(injected.at(-1).target.tabId, 42);
+  assert.equal(messages.at(-1).m.task.platform, "wechat");
+  assert.equal(messages.at(-1).m.task.fillOnly, true);
+});
+
+test("公众号入口使用当前会话的新文章地址，旧图文与已有草稿不能作为填充目标", () => {
+  const list =
+    "https://mp.weixin.qq.com/cgi-bin/appmsg?begin=0&count=10&type=77&action=list_card&token=current-session&lang=zh_CN";
+  const url = target.editorUrl("wechat", "article", list);
+  const params = new URL(url).searchParams;
+  assert.equal(params.get("token"), "current-session");
+  assert.equal(params.get("t"), "media/appmsg_edit_v2");
+  assert.equal(params.get("type"), "10");
+  assert.equal(params.get("isNew"), "1");
+  assert.ok(Number(params.get("timestamp")) > 0);
+  assert.equal(target.pageRole(url).role, "editor");
+  assert.equal(target.pageRole(list).role, "site");
+  const job = model.validateTask({
+    id: "wx",
+    kind: "article",
+    title: "文章",
+    markdown: "正文",
+    platforms: ["wechat"],
+    assets: [],
+  });
+  job.results = { wechat: { state: "needs_attention" } };
+  assert.equal(target.assertTarget(job, { url }), "wechat");
+  for (const invalid of [
+    list,
+    url + "&appmsgid=1",
+    url.replace("appmsg_edit_v2", "appmsg_edit"),
+    url.replace("type=10", "type=77"),
+    url.replace("isNew=1", "isNew=0"),
+  ]) {
+    assert.equal(target.pageRole(invalid).role, "site");
+    assert.throws(() => target.assertTarget(job, { url: invalid }), /新的创作/);
+  }
+  job.results.wechat.state = "draft_ready";
+  assert.throws(() => target.assertTarget(job, { url }), /处理记录/);
+  const noSession = new URL(
+    target.editorUrl(
+      "wechat",
+      "article",
+      "https://mp.weixin.qq.com.evil.test/?token=stolen",
+    ),
+  );
+  assert.equal(noSession.searchParams.get("token"), null);
+  assert.equal(noSession.searchParams.get("action"), "list_card");
 });

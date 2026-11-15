@@ -22,7 +22,7 @@ async function send(type, data = {}) {
   return r;
 }
 function titleOf(job) {
-  return job.overrides?.[target?.platform]?.title || job.title;
+  return job.overrides?.[target?.platform]?.title ?? job.title;
 }
 function blockReason(job) {
   if (!target?.platform) return "当前页还不能填充";
@@ -36,7 +36,9 @@ function blockReason(job) {
       "个字符，请在工作台调整"
     );
   const state = job.results?.[target.platform]?.state;
-  const assist = PLATFORMS[target.platform].automation === "assist";
+  const assist =
+    PLATFORMS[target.platform].automation === "assist" ||
+    target.platform === "wechat";
   if (
     state &&
     !["ready", "queued", "failed"].includes(state) &&
@@ -76,28 +78,36 @@ function videoCard(job) {
   const reason = blockReason(job);
   const note = failureNote(job);
   const title = titleOf(job);
-  const desc = (job.overrides?.[target.platform]?.description ?? job.description) || "";
+  const desc =
+    (job.overrides?.[target.platform]?.description ?? job.description) || "";
   return `<article class="card"><h2>${esc(title)}</h2><div class="thumb" data-thumb-for="${esc(job.id)}"></div><p>${esc(desc.slice(0, 80))}</p><div class="row"><span>短标题</span><b>${esc(title)}</b></div>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}<div class="covers">${coverButtons(job)}</div></article>`;
 }
+function articleCard(job) {
+  const reason = blockReason(job);
+  const note = failureNote(job);
+  return `<article class="card"><h2>${esc(titleOf(job))}</h2><p>${esc((job.overrides?.wechat?.description ?? job.description) || "文章正文与配图")}</p>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}<p class="note">填充失败时，可在完整工作台复制微信正文粘贴。</p></article>`;
+}
 function guideBar() {
-  return `<div class="topbar"><button class="guide" data-action="workbench"><span>打开完整工作台</span><small>管理视频、删除草稿在那里进行</small></button></div>`;
+  return `<div class="topbar"><button class="guide" data-action="workbench"><span>打开完整工作台</span><small>管理内容、复制正文、删除草稿在那里进行</small></button></div>`;
 }
 function render() {
   const name = target?.platform ? PLATFORMS[target.platform].name : "当前页";
-  const videos = jobs.filter((j) => j.kind === "video");
+  const article = target?.platform === "wechat";
+  const kind = article ? "article" : "video";
+  const items = jobs.filter((j) => j.kind === kind);
   const guide = guideBar();
   if (!target || target.role === "other") {
     app.innerHTML = `${guide}<header><h1>Omnipost</h1></header><p class="empty">当前页不是支持的发布页。</p>`;
     return;
   }
   if (target.role !== "editor") {
-    app.innerHTML = `${guide}<header><h1>${esc(name)}</h1></header><p class="where">当前还不是视频发布页。</p><p class="note">打开发布页后，在这里选择一条视频填入。</p><div class="page-action"><button class="go" data-action="open-editor">前往发布页</button></div>${error ? `<p class="error">${esc(error)}</p>` : ""}`;
+    app.innerHTML = `${guide}<header><h1>${esc(name)}</h1></header><p class="where">${article ? "请打开公众号的新文章编辑器。" : "当前还不是视频发布页。"}</p><p class="note">${article ? "从草稿箱点击「新的创作 → 文章」，或点击下方按钮。登录后请再次前往文章编辑器。" : "打开发布页后，在这里选择一条视频填入。"}</p><div class="page-action"><button class="go" data-action="open-editor">前往发布页</button></div>${error ? `<p class="error">${esc(error)}</p>` : ""}`;
     return;
   }
-  app.innerHTML = `${guide}<header><h1>${esc(name)}</h1></header><p class="where">选择一条视频，填入这个页面。</p>${error ? `<p class="error">${esc(error)}</p>` : ""}${
-    videos.length
-      ? videos.map(videoCard).join("")
-      : `<p class="empty">还没有视频。先在完整工作台导入，或让 AI 交接。</p>`
+  app.innerHTML = `${guide}<header><h1>${esc(name)}</h1></header><p class="where">选择一${article ? "篇文章" : "条视频"}，填入这个页面。</p>${error ? `<p class="error">${esc(error)}</p>` : ""}${
+    items.length
+      ? items.map(article ? articleCard : videoCard).join("")
+      : `<p class="empty">还没有${article ? "文章" : "视频"}。先在完整工作台导入，或让 AI 交接。</p>`
   }`;
   mountThumbs();
 }
@@ -142,7 +152,9 @@ async function showCover(jobId, assetId) {
   if (!asset) return;
   const r = await send("UI_ASSET", { id: job.id, assetId: asset.id });
   const blob = new Blob(
-    r.chunks.map((chunk) => Uint8Array.from(atob(chunk), (c) => c.charCodeAt(0))),
+    r.chunks.map((chunk) =>
+      Uint8Array.from(atob(chunk), (c) => c.charCodeAt(0)),
+    ),
     { type: asset.type },
   );
   const url = URL.createObjectURL(blob);
@@ -190,7 +202,7 @@ app.addEventListener("click", async (e) => {
     if (b.dataset.action === "open-editor") {
       await send("OPEN_PLATFORM", {
         platform: target.platform,
-        kind: "video",
+        kind: target.platform === "wechat" ? "article" : "video",
         tabId,
       });
       return;

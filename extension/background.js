@@ -64,6 +64,18 @@ async function waitTab(tabId) {
   }
   throw new Error("平台页面加载超时");
 }
+async function platformEditorUrl(platform, kind, tabId) {
+  if (platform !== "wechat") return editorUrl(platform, kind);
+  const tabs = tabId
+    ? [await chrome.tabs.get(tabId)]
+    : await chrome.tabs.query({});
+  const context = tabs.find(
+    (tab) =>
+      platformForUrl(tab.url) === "wechat" &&
+      new URL(tab.url).searchParams.get("token"),
+  );
+  return editorUrl(platform, kind, context?.url);
+}
 async function runPlatform(task, platform, targetTab) {
   const config = PLATFORMS[platform];
   let tab;
@@ -73,7 +85,8 @@ async function runPlatform(task, platform, targetTab) {
       state: "opening",
       message: "打开" + config.name,
     });
-    const url = editorUrl(platform, task.kind);
+    const url =
+      targetTab?.url || (await platformEditorUrl(platform, task.kind));
     tab = targetTab || (await chrome.tabs.create({ url, active: true }));
     if (targetTab) {
       await chrome.tabs.update(tab.id, { active: true });
@@ -486,9 +499,10 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     }
     if (message.type === "OPEN_PLATFORM") {
       if (!PLATFORMS[message.platform]) throw new Error("未知平台");
-      const url = editorUrl(
+      const url = await platformEditorUrl(
         message.platform,
         message.kind === "article" ? "article" : "video",
+        message.tabId,
       );
       if (message.tabId) {
         await chrome.tabs.update(message.tabId, { url, active: true });

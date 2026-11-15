@@ -127,12 +127,13 @@
     return [...node.childNodes].map(plainText).join("");
   }
   async function richPaste(el, html, append = false) {
+    const editorDocument = el.ownerDocument || document;
     const previous = plainText(el);
     if (!append && norm(previous))
       attention("编辑器已有内容，已停住以保留平台中的修改。请新建草稿后重试。");
     el.focus();
     {
-      const range = document.createRange();
+      const range = editorDocument.createRange();
       let anchor = el;
       if (append && el.matches("[data-testid=composer]")) {
         const blocks = [...el.querySelectorAll("[data-block=true]")].filter(
@@ -147,17 +148,20 @@
       }
       range.selectNodeContents(anchor);
       range.collapse(!append);
-      const selection = getSelection();
+      const selection =
+        editorDocument.defaultView?.getSelection?.() || getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+      editorDocument.dispatchEvent(
+        new Event("selectionchange", { bubbles: true }),
+      );
       if (typeof MouseEvent !== "undefined")
         el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       await sleep(100);
     }
     const dt = new DataTransfer();
     dt.setData("text/html", html);
-    const tmp = document.createElement("div");
+    const tmp = editorDocument.createElement("div");
     tmp.innerHTML = html;
     dt.setData("text/plain", tmp.innerText || tmp.textContent);
     const event = new ClipboardEvent("paste", {
@@ -174,7 +178,7 @@
       )
         await sleep(40);
       if (compact(plainText(el)) === compact(previous))
-        document.execCommand("insertHTML", false, html);
+        editorDocument.execCommand("insertHTML", false, html);
     }
     const expected = compact(previous + tmp.textContent);
     await wait(
@@ -568,23 +572,84 @@
       attention("X 未返回独立的草稿地址，请打开编辑器检查");
     return result(task, "X 显示 Last saved，且已返回独立文章草稿地址");
   }
+  function wechatBody() {
+    const selector =
+      '.ProseMirror[contenteditable="true"], #js_editor [contenteditable="true"], #ueditor_0[contenteditable="true"], [contenteditable="true"][data-placeholder*="正文"], [contenteditable="true"][role="textbox"][aria-label*="正文"]';
+    const direct = field(selector);
+    if (direct) return direct;
+    for (const iframe of document.querySelectorAll(
+      "#ueditor_0, .edui-editor-iframeholder iframe, #js_editor iframe",
+    )) {
+      try {
+        if (visible(iframe) && iframe.contentDocument?.body?.isContentEditable)
+          return iframe.contentDocument.body;
+      } catch {}
+    }
+    return null;
+  }
   async function wechatArticle(task) {
     auth();
-    await status(task, "filling", "读取当前公众号并准备图文草稿");
-    const home = await fetch("/", { credentials: "include" });
-    const source = await home.text();
-    const find = (pattern) => pattern.exec(source)?.[1] || "";
-    const token = find(/data:\s*\{[\s\S]*?t:\s*["']([^"']+)["']/);
-    const user = find(/user_name:\s*["']([^"']+)["']/),
-      ticket = find(/ticket:\s*["']([^"']+)["']/),
+    const page = new URL(location.href);
+    if (
+      page.pathname !== "/cgi-bin/appmsg" ||
+      page.searchParams.get("t") !== "media/appmsg_edit_v2" ||
+      page.searchParams.get("type") !== "10" ||
+      page.searchParams.get("action") !== "edit" ||
+      page.searchParams.get("isNew") !== "1" ||
+      page.searchParams.has("appmsgid")
+    )
+      attention(
+        "请在公众号草稿箱点击「新的创作 → 文章」，打开新文章编辑器后再填充；也可在工作台复制微信正文粘贴。",
+      );
+    const title = await wait(
+      () =>
+        field(
+          '#title, #js_title, input[placeholder*="标题"], textarea[placeholder*="标题"]',
+        ),
+      "未找到公众号文章标题，请在工作台复制标题和微信正文手动粘贴",
+    );
+    const editor = await wait(
+      wechatBody,
+      "未找到公众号正文编辑器，请在工作台复制微信正文手动粘贴",
+    );
+    const digest = field(
+      '#js_description, #digest, textarea[name="digest"], textarea[placeholder*="摘要"]',
+    );
+    const assertEmpty = () => {
+      if (
+        norm(title.value || title.textContent) ||
+        norm(plainText(editor)) ||
+        editor.querySelector("img,video,iframe") ||
+        norm(digest?.value || digest?.textContent)
+      )
+        attention(
+          "编辑器已有内容，已停止以保留你的修改。请新建文章后重试，或在工作台复制正文手动粘贴。",
+        );
+    };
+    assertEmpty();
+    if (!task.prepared?.wechat) throw new Error("缺少微信正文，请重新导入文章");
+    await status(task, "filling", "准备公众号新文章正文");
+    let token = page.searchParams.get("token"),
+      user = "",
+      ticket = "",
+      time = "";
+    if (task.prepared.wechat.includes("<img")) {
+      const home = await fetch("/", { credentials: "include" });
+      const source = await home.text();
+      const find = (pattern) => pattern.exec(source)?.[1] || "";
+      token ||= find(/data:\s*\{[\s\S]*?t:\s*["']([^"']+)["']/);
+      user = find(/user_name:\s*["']([^"']+)["']/);
+      ticket = find(/ticket:\s*["']([^"']+)["']/);
       time = find(/time:\s*["'](\d+)["']/);
-    if (!token || !user || !ticket)
-      attention("未读取到公众号登录状态，请重新登录后台");
+      if (!token || !user || !ticket)
+        attention(
+          "未读取到公众号图片上传凭据，请重新登录；也可在工作台复制微信正文手动粘贴。",
+        );
+    }
     const doc = new DOMParser().parseFromString(
       "<html><body>" + task.prepared.wechat + "</body></html>",
       "text/html",
     );
-    let cover = "";
     let n = 0;
     for (const img of [...doc.querySelectorAll("img")]) {
       const id =
@@ -630,83 +695,23 @@
         );
       img.src = data.cdn_url;
       img.removeAttribute("data-asset-id");
-      cover ||= data.cdn_url;
     }
     doc.querySelectorAll("a").forEach((a) => {
       if (!/^https:\/\/([\w-]+\.)?weixin\.qq\.com\//.test(a.href))
         a.replaceWith(...a.childNodes);
     });
-    const form = new URLSearchParams({
-      token,
-      lang: "zh_CN",
-      f: "json",
-      ajax: "1",
-      random: String(Math.random()),
-      AppMsgId: "",
-      count: "1",
-      data_seq: "0",
-      operate_from: "Chrome",
-      isnew: "0",
-      title0: task.title,
-      author0: "",
-      fileid0: "",
-      digest0: task.description || "",
-      auto_gen_digest0: task.description ? "0" : "1",
-      content0: doc.body.innerHTML,
-      sourceurl0: "",
-      need_open_comment0: "1",
-      only_fans_can_comment0: "0",
-      cdn_url0: cover,
-      cdn_235_1_url0: cover,
-      cdn_1_1_url0: cover,
-      cdn_url_back0: cover,
-      show_cover_pic0: cover ? "1" : "0",
-      copyright_type0: "0",
-      comment_id0: "",
-      music_id0: "",
-      video_id0: "",
-      voteid0: "",
-      crop_list0: "",
-      categories_list0: "[]",
-      dot0: "{}",
-    });
-    await status(task, "saving", "保存公众号图文草稿");
-    let data;
-    try {
-      const response = await fetch(
-        "/cgi-bin/operate_appmsg?" +
-          new URLSearchParams({
-            t: "ajax-response",
-            sub: "create",
-            type: "77",
-            token,
-            lang: "zh_CN",
-          }),
-        { method: "POST", credentials: "include", body: form },
-      );
-      data = await response.json();
-    } catch {
-      attention("公众号保存响应中断，请先检查草稿箱，避免重复创建");
-    }
-    if (!data.appMsgId)
-      attention(
-        "公众号未返回草稿 ID：" +
-          (data.base_resp?.err_msg || data.ret || "请在后台检查"),
-      );
-    const url =
-      "https://mp.weixin.qq.com/cgi-bin/appmsg?" +
-      new URLSearchParams({
-        t: "media/appmsg_edit",
-        action: "edit",
-        type: "77",
-        appmsgid: String(data.appMsgId),
-        token,
-        lang: "zh_CN",
-      });
+    assertEmpty();
+    await status(task, "filling", "填入公众号文章标题和正文");
+    textField(title, task.title);
+    await richPaste(editor, doc.body.innerHTML);
+    if (digest && task.description) textField(digest, task.description);
     return {
-      ...result(task, "公众号返回独立图文草稿 ID " + data.appMsgId, url),
-      postId: String(data.appMsgId),
-      editorUrl: url,
+      state: "needs_attention",
+      persisted: false,
+      message:
+        "已填入公众号新文章标题和正文。请核对配图、封面和摘要，并在平台保存草稿；最终发布由你确认。",
+      editorUrl: location.href,
+      resume: { title: task.title, kind: task.kind },
     };
   }
   async function video(task) {
@@ -817,9 +822,7 @@
         300000,
       );
       textField(desc, task.description || task.title);
-      const title = editable().find((el) =>
-        /短标题|概括视频/.test(hintOf(el)),
-      );
+      const title = editable().find((el) => /短标题|概括视频/.test(hintOf(el)));
       if (title) textField(title, task.title);
       if (task.fillOnly)
         attention(

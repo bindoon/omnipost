@@ -7,82 +7,134 @@ const source = await fs.readFile(
   new URL("../extension/content/runner.js", import.meta.url),
   "utf8",
 );
-async function run({
+const wechatEditor =
+  "https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&isNew=1&type=10&token=session-token&lang=zh_CN";
+async function runWechat({
   imageFailure = false,
-  saveFailure = false,
   auth = true,
+  existing = "",
+  href = wechatEditor,
+  withImage = true,
+  pasteFailure = false,
+  iframe = false,
 } = {}) {
-  const { document } = parseHTML(
-    "<html><body><main>公众号后台</main></body></html>",
+  const { document, window } = parseHTML(
+    `<html><body><textarea id="title">${existing}</textarea><textarea id="js_description"></textarea><div id="js_editor"><div class="ProseMirror" contenteditable="true"></div></div><button>保存为草稿</button><button>发表</button></body></html>`,
   );
-  const calls = [];
-  let listener;
-  const chrome = {
-    runtime: {
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        },
-      },
-      async sendMessage(m) {
-        if (m.type === "ASSET")
-          return {
-            ok: true,
-            chunk: Buffer.from("image bytes").toString("base64"),
-          };
-        return { ok: true };
-      },
-    },
-  };
-  const fakeFetch = async (url, options) => {
-    calls.push({ url, options });
-    if (url === "/")
-      return {
-        text: async () =>
-          auth
-            ? 'data: {t: "demo-token"}; user_name: "demo-user"; ticket: "demo-ticket"; time: "123"'
-            : "login page",
-      };
-    if (url.startsWith("/cgi-bin/filetransfer"))
-      return {
-        json: async () =>
-          imageFailure
-            ? { base_resp: { ret: 1, err_msg: "image error" } }
-            : {
-                base_resp: { ret: 0 },
-                cdn_url: "https://mmbiz.qpic.cn/demo.jpg",
-              },
-      };
-    if (url.startsWith("/cgi-bin/operate_appmsg")) {
-      if (saveFailure) throw new Error("network disconnected");
-      return {
-        json: async () => ({ appMsgId: "987654321", base_resp: { ret: 0 } }),
-      };
+  window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    width: 100,
+    height: 30,
+  });
+  window.HTMLElement.prototype.focus = () => {};
+  let editor = document.querySelector(".ProseMirror");
+  let editorDocument = document;
+  if (iframe) {
+    const inner = parseHTML(
+      '<html><body contenteditable="true"></body></html>',
+    );
+    editorDocument = inner.document;
+    editor = inner.document.body;
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    const frame = document.createElement("iframe");
+    frame.id = "ueditor_0";
+    Object.defineProperty(frame, "contentDocument", { value: editorDocument });
+    document.querySelector("#js_editor").replaceChildren(frame);
+  }
+  editorDocument.createRange = () => ({
+    selectNodeContents() {},
+    collapse() {},
+  });
+  editorDocument.execCommand = () => false;
+  editor.addEventListener("paste", (event) => {
+    event.preventDefault();
+    if (!pasteFailure)
+      editor.innerHTML = event.clipboardData.getData("text/html");
+  });
+  class Transfer {
+    constructor() {
+      this.values = new Map();
     }
-    throw new Error("Unexpected network call " + url);
-  };
+    setData(k, v) {
+      this.values.set(k, v);
+    }
+    getData(k) {
+      return this.values.get(k) || "";
+    }
+  }
+  class ClipEvent extends window.Event {
+    constructor(type, options) {
+      super(type, options);
+      this.clipboardData = options.clipboardData;
+    }
+  }
+  const calls = [];
+  let listener,
+    buttonClicks = 0;
+  document
+    .querySelectorAll("button")
+    .forEach((button) => (button.onclick = () => buttonClicks++));
   const context = vm.createContext({
     document,
     location: {
-      origin: "https://mp.weixin.qq.com",
-      pathname: "/",
-      href: "https://mp.weixin.qq.com/",
+      origin: new URL(href).origin,
+      pathname: new URL(href).pathname,
+      href,
     },
-    chrome,
-    fetch: fakeFetch,
+    chrome: {
+      runtime: {
+        onMessage: { addListener: (fn) => (listener = fn) },
+        sendMessage: async (m) =>
+          m.type === "ASSET"
+            ? { ok: true, chunk: Buffer.from("image bytes").toString("base64") }
+            : { ok: true },
+      },
+    },
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      if (url === "/")
+        return {
+          text: async () =>
+            auth
+              ? 'data: {t: "demo-token"}; user_name: "demo-user"; ticket: "demo-ticket"; time: "123"'
+              : "login page",
+        };
+      if (url.startsWith("/cgi-bin/filetransfer"))
+        return {
+          json: async () =>
+            imageFailure
+              ? { base_resp: { ret: 1, err_msg: "image error" } }
+              : {
+                  base_resp: { ret: 0 },
+                  cdn_url: "https://mmbiz.qpic.cn/demo.jpg",
+                },
+        };
+      throw new Error("Unexpected network call " + url);
+    },
     DOMParser,
     File,
     FormData,
     URLSearchParams,
     URL,
-    Date,
     console,
+    atob,
+    HTMLTextAreaElement: window.HTMLTextAreaElement,
+    HTMLInputElement: window.HTMLInputElement,
+    InputEvent: window.Event,
+    Event: window.Event,
+    ClipboardEvent: ClipEvent,
+    DataTransfer: Transfer,
+    getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     setInterval,
     clearInterval,
-    setTimeout,
+    setTimeout: (fn) => setTimeout(fn, 0),
     clearTimeout,
-    atob,
-    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    Date: class extends Date {
+      static current = Date.now();
+      static now() {
+        return (this.current += 400);
+      }
+    },
   });
   vm.runInContext(source, context);
   const task = {
@@ -91,6 +143,7 @@ async function run({
     platform: "wechat",
     title: "图文标题",
     description: "摘要",
+    fillOnly: true,
     assets: [
       {
         id: "image-1",
@@ -102,45 +155,94 @@ async function run({
     ],
     prepared: {
       wechat:
-        '<p style="font-size:20px"><strong>制作过程</strong></p><p>正文</p><p><img data-asset-id="image-1" src="publisher-asset:image-1"></p>',
-      media: [{ id: "image-1", alt: "截图" }],
+        '<p style="font-size:20px"><strong>制作过程</strong></p><p>正文</p>' +
+        (withImage
+          ? '<p><img data-asset-id="image-1" src="publisher-asset:image-1"></p>'
+          : ""),
+      media: withImage ? [{ id: "image-1", alt: "截图" }] : [],
     },
   };
   const response = await new Promise((resolve) =>
     listener({ type: "RUN_DRAFT", task }, {}, resolve),
   );
-  return { response, calls };
+  return { response, calls, document, editor, buttonClicks };
 }
-test("微信适配器先上传真实图片，再保存图文草稿，并返回平台草稿ID；没有公开发布请求", async () => {
-  const { response, calls } = await run();
-  assert.equal(response.result.state, "draft_ready");
-  assert.equal(response.result.postId, "987654321");
-  const upload = calls.find((c) => c.url.includes("filetransfer"));
-  assert.equal(await upload.options.body.get("file").text(), "image bytes");
-  const save = calls.find((c) => c.url.includes("operate_appmsg"));
-  assert.equal(save.options.body.get("title0"), "图文标题");
-  const html = save.options.body.get("content0");
-  assert.match(html, /https:\/\/mmbiz.qpic.cn\/demo.jpg/);
-  assert.doesNotMatch(html, /publisher-asset:/);
-  assert.match(html, /font-size:20px/);
-  assert.equal(calls.filter((c) => c.url.includes("operate_appmsg")).length, 1);
-  assert.ok(calls.every((c) => !/(masssend|mass_send|publish)/i.test(c.url)));
+for (const iframe of [false, true])
+  test(`微信新文章${iframe ? " iframe" : ""}编辑器填入排版正文和已上传配图，不调用旧图文创建接口`, async () => {
+    const { response, calls, document, editor, buttonClicks } = await runWechat(
+      { iframe },
+    );
+    assert.equal(response.result.state, "needs_attention");
+    assert.equal(response.result.persisted, false);
+    assert.match(response.result.message, /已填入公众号新文章/);
+    assert.equal(document.querySelector("#title").value, "图文标题");
+    assert.equal(document.querySelector("#js_description").value, "摘要");
+    assert.match(editor.innerHTML, /https:\/\/mmbiz.qpic.cn\/demo.jpg/);
+    assert.match(editor.innerHTML, /font-size:20px/);
+    assert.doesNotMatch(editor.innerHTML, /publisher-asset:/);
+    assert.equal(
+      await calls
+        .find((c) => c.url.includes("filetransfer"))
+        .options.body.get("file")
+        .text(),
+      "image bytes",
+    );
+    assert.equal(buttonClicks, 0);
+    assert.ok(
+      calls.every(
+        (c) => !/operate_appmsg|masssend|mass_send|publish/i.test(c.url),
+      ),
+    );
+  });
+test("配图上传失败时不写入缺图文章，并保留手动复制入口", async () => {
+  const { response, calls, editor, document } = await runWechat({
+    imageFailure: true,
+  });
+  assert.equal(response.result.state, "needs_attention");
+  assert.match(response.result.message, /图片上传失败/);
+  assert.equal(editor.textContent, "");
+  assert.equal(document.querySelector("#title").value, "");
+  assert.equal(calls.length, 2);
 });
-test("配图上传失败时，不创建缺图草稿，也不报告保存成功", async () => {
-  const { response, calls } = await run({ imageFailure: true });
+test("公众号已有内容时在上传前停止，不覆盖用户修改", async () => {
+  const { response, calls, document } = await runWechat({
+    existing: "手改标题",
+  });
+  assert.match(response.result.message, /已有内容/);
+  assert.equal(calls.length, 0);
+  assert.equal(document.querySelector("#title").value, "手改标题");
+});
+test("微信旧图文编辑器和草稿列表均要求进入新的创作 → 文章", async () => {
+  for (const href of [
+    "https://mp.weixin.qq.com/",
+    wechatEditor
+      .replace("appmsg_edit_v2", "appmsg_edit")
+      .replace("type=10", "type=77"),
+    wechatEditor + "&appmsgid=1",
+  ]) {
+    const { response, calls } = await runWechat({ href });
+    assert.match(response.result.message, /新的创作 → 文章/);
+    assert.equal(calls.length, 0);
+  }
+});
+test("微信正文粘贴失败时明确要求检查，不报告已填充或保存", async () => {
+  const { response } = await runWechat({ pasteFailure: true });
   assert.equal(response.result.state, "needs_attention");
   assert.equal(response.result.persisted, false);
-  assert.ok(!calls.some((c) => c.url.includes("operate_appmsg")));
+  assert.match(response.result.message, /没有接收完整富文本/);
 });
-test("保存响应中断时停在需检查状态，不自动重发创建请求", async () => {
-  const { response, calls } = await run({ saveFailure: true });
-  assert.equal(response.result.state, "needs_attention");
-  assert.match(response.result.message, /避免重复创建/);
-  assert.equal(calls.filter((c) => c.url.includes("operate_appmsg")).length, 1);
+test("公众号无配图文章不依赖图片上传凭据", async () => {
+  const { response, calls } = await runWechat({
+    withImage: false,
+    auth: false,
+  });
+  assert.match(response.result.message, /已填入公众号新文章/);
+  assert.equal(calls.length, 0);
 });
-test("未登录时只读取登录页面，不上传图片或创建草稿", async () => {
-  const { response, calls } = await run({ auth: false });
+test("公众号图片上传凭据失效时不上传或创建草稿", async () => {
+  const { response, calls } = await runWechat({ auth: false });
   assert.equal(response.result.state, "needs_attention");
+  assert.match(response.result.message, /复制微信正文/);
   assert.equal(calls.length, 1);
 });
 

@@ -1,8 +1,5 @@
 import { marked } from "marked";
-import {
-  prepareForWechat,
-  prepareForX,
-} from "../../src/formats.mjs";
+import { prepareForWechat, prepareForX } from "../../src/formats.mjs";
 const FONT =
   "-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif";
 export function normalizePath(p) {

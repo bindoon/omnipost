@@ -1043,3 +1043,85 @@ textarea {
   font-size: 13px;
   line-height: 1.5;
 }
+
+.article-copy {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #dce6e1;
+  border-radius: 10px;
+  background: #f4faf7;
+}
+.article-copy p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #526759;
+}
+.article-copy .job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.article-copy [role="status"]:empty {
+  display: none;
+}
+
+.library-articles {
+  max-width: 1200px;
+}
+.article-card-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 28px;
+  align-items: start;
+  padding: 0 0 10px;
+}
+.article-controls {
+  min-width: 0;
+}
+.article-preview {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f7f9fa;
+}
+.article-preview-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.article-preview-label span {
+  color: #8f9aa7;
+  font-size: 11px;
+  font-weight: 400;
+}
+.article-preview .phone {
+  width: 100%;
+}
+.article-preview .phone-content {
+  min-height: 380px;
+  max-height: 580px;
+  overflow-wrap: anywhere;
+}
+.article-preview .phone-content:focus-visible {
+  outline: 2px solid #008a69;
+  outline-offset: -2px;
+}
+.article-preview .article-image-missing {
+  border: 1px dashed #ccd8d1;
+  border-radius: 6px;
+  padding: 12px;
+  background: #f4f8f5;
+}
+@media (max-width: 850px) {
+  .article-card-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .article-preview .phone {
+    max-width: 420px;
+  }
+}

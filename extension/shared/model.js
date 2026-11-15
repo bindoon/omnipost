@@ -5,7 +5,7 @@ export const PLATFORMS = {
     glyph: "微",
     color: "#07a86c",
     kinds: ["article"],
-    url: "https://mp.weixin.qq.com/",
+    url: "https://mp.weixin.qq.com/cgi-bin/appmsg?begin=0&count=10&type=77&action=list_card&lang=zh_CN",
     caption: "图文草稿 · 保留正文排版",
     automation: "direct",
   },
