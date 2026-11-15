@@ -94,8 +94,11 @@ export const TERMINAL = new Set([
   "needs_attention",
   "failed",
 ]);
+// 暂时关闭。改回 true 即恢复命令、桥接和工作台里的 X 回复。
+export const X_REPLY_ENABLED = false;
 export function validateTask(input) {
   if (input?.kind === "x_reply") {
+    if (!X_REPLY_ENABLED) throw new Error("X 回复暂时关闭");
     if (
       input.mode !== "review" ||
       !Array.isArray(input.platforms) ||

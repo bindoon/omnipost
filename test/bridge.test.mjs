@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
 import { startBridge } from "../bridge/server.mjs";
+import { X_REPLY_ENABLED } from "../extension/shared/model.js";
 const token = "a".repeat(64);
 const task = (id = "job-1", platforms = ["x"]) => ({
   id,
@@ -124,60 +125,80 @@ test("AI 提交→模拟扩展领取与保存回包→AI 得到草稿链接；�
   assert.equal((await req("/jobs", "POST", task())).status, 200);
   assert.equal((await req("/jobs/job-1/retry/x", "POST", {})).status, 409);
 });
-test("X 回复通过本地桥接交给扩展审阅，原帖去重且结果独立于平台草稿", async (t) => {
-  const { b, req } = await fixture(t);
-  const w = await worker(t, b);
-  const reply = {
-    kind: "x_reply",
-    platforms: ["x"],
-    mode: "review",
-    targetUrl: "https://x.com/Author/status/123?s=20",
-    description: "给原帖补一个例子。",
-  };
-  assert.equal(
-    (await req("/jobs", "POST", { ...reply, mode: "publish" })).status,
-    400,
-  );
-  assert.equal(
-    (
-      await req("/jobs", "POST", {
-        ...reply,
-        targetUrl: "https://x.com.evil.example/Author/status/123",
-      })
-    ).status,
-    400,
-  );
-  assert.equal((await req("/jobs", "POST", reply)).status, 201);
-  const { task: received } = await w.next();
-  assert.equal(received.id, "x-reply-123");
-  assert.equal(received.targetUrl, "https://x.com/author/status/123");
-  w.ws.send(
-    JSON.stringify({
-      type: "result",
-      id: received.id,
-      platform: "x",
-      result: saved,
-    }),
-  );
-  assert.equal((await w.next()).type, "error");
-  w.ws.send(
-    JSON.stringify({
-      type: "result",
-      id: received.id,
-      platform: "x",
-      result: { state: "review_ready" },
-    }),
-  );
-  assert.equal((await w.next()).type, "ack");
-  const { value } = await req("/jobs/x-reply-123");
-  assert.equal(value.results.x.state, "review_ready");
-  assert.equal(value.results.x.draftUrl, undefined);
-  assert.equal((await req("/jobs", "POST", reply)).status, 200);
-  assert.equal(
-    (await req("/jobs", "POST", { ...reply, description: "改稿" })).status,
-    409,
-  );
-});
+test(
+  "X 回复暂时关闭时桥接拒绝新的回复任务",
+  { skip: X_REPLY_ENABLED },
+  async (t) => {
+    const { req } = await fixture(t);
+    const res = await req("/jobs", "POST", {
+      kind: "x_reply",
+      platforms: ["x"],
+      mode: "review",
+      targetUrl: "https://x.com/Author/status/123?s=20",
+      description: "给原帖补一个例子。",
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.value.error, /暂时关闭/);
+  },
+);
+test(
+  "X 回复通过本地桥接交给扩展审阅，原帖去重且结果独立于平台草稿",
+  { skip: !X_REPLY_ENABLED },
+  async (t) => {
+    const { b, req } = await fixture(t);
+    const w = await worker(t, b);
+    const reply = {
+      kind: "x_reply",
+      platforms: ["x"],
+      mode: "review",
+      targetUrl: "https://x.com/Author/status/123?s=20",
+      description: "给原帖补一个例子。",
+    };
+    assert.equal(
+      (await req("/jobs", "POST", { ...reply, mode: "publish" })).status,
+      400,
+    );
+    assert.equal(
+      (
+        await req("/jobs", "POST", {
+          ...reply,
+          targetUrl: "https://x.com.evil.example/Author/status/123",
+        })
+      ).status,
+      400,
+    );
+    assert.equal((await req("/jobs", "POST", reply)).status, 201);
+    const { task: received } = await w.next();
+    assert.equal(received.id, "x-reply-123");
+    assert.equal(received.targetUrl, "https://x.com/author/status/123");
+    w.ws.send(
+      JSON.stringify({
+        type: "result",
+        id: received.id,
+        platform: "x",
+        result: saved,
+      }),
+    );
+    assert.equal((await w.next()).type, "error");
+    w.ws.send(
+      JSON.stringify({
+        type: "result",
+        id: received.id,
+        platform: "x",
+        result: { state: "review_ready" },
+      }),
+    );
+    assert.equal((await w.next()).type, "ack");
+    const { value } = await req("/jobs/x-reply-123");
+    assert.equal(value.results.x.state, "review_ready");
+    assert.equal(value.results.x.draftUrl, undefined);
+    assert.equal((await req("/jobs", "POST", reply)).status, 200);
+    assert.equal(
+      (await req("/jobs", "POST", { ...reply, description: "改稿" })).status,
+      409,
+    );
+  },
+);
 test("失败平台可单独重试，已经保存的平台不再次创建草稿", async (t) => {
   const { b, req } = await fixture(t);
   const w = await worker(t, b);

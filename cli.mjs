@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { DOMParser } from "linkedom";
 import { startBridge } from "./bridge/server.mjs";
-import { validateTask } from "./extension/shared/model.js";
+import { validateTask, X_REPLY_ENABLED } from "./extension/shared/model.js";
 import { extractTitle, renderArticle } from "./extension/shared/content.js";
 import { collectMedia, resolveLocalImage } from "./src/media.mjs";
 const base = path.dirname(fileURLToPath(import.meta.url));
@@ -154,11 +154,14 @@ async function main() {
     console.log(
       "omnipost serve | pair | doctor | draft file.md --platforms wechat,xiaohongshu,x | video file.mp4 --title 标题 | status ID | list | retry ID PLATFORM | open ID PLATFORM\n--stage 仅交接到插件，等待当前页填充。--cover-landscape / --cover-portrait 保存横竖封面。默认只生成草稿。--overrides JSON 可逐平台调整 title/description。--full 输出完整任务。",
     );
-    console.log(
-      "x-reply X_POST_URL --description-file reply.txt：把回复交给 Chrome 工作台审阅。",
-    );
+    if (X_REPLY_ENABLED)
+      console.log(
+        "x-reply X_POST_URL --description-file reply.txt：把回复交给 Chrome 工作台审阅。",
+      );
     return;
   }
+  if (command === "x-reply" && !X_REPLY_ENABLED)
+    throw new Error("X 回复暂时关闭");
   const config = JSON.parse(
     await fs.readFile(path.join(dataDir, "config.json"), "utf8"),
   );

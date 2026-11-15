@@ -3,6 +3,18 @@
   "version": "0.1.0",
   "description": "Local Chrome extension and CLI that drafts articles and videos to WeChat, Xiaohongshu, X, Channels, and Douyin.",
   "license": "MIT",
+  "keywords": [
+    "chrome-extension",
+    "cli",
+    "draft",
+    "wechat",
+    "xiaohongshu",
+    "douyin"
+  ],
+  "homepage": "https://github.com/bindoon/omnipost#readme",
+  "bugs": {
+    "url": "https://github.com/bindoon/omnipost/issues"
+  },
   "type": "module",
   "bin": {
     "omnipost": "./cli.mjs"
@@ -14,6 +26,7 @@
     "extension",
     "src",
     "docs",
+    "skills",
     "README.md",
     "LICENSE"
   ],

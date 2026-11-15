@@ -6,6 +6,7 @@ import {
   TERMINAL,
   platformsFor,
   isAssist,
+  X_REPLY_ENABLED,
 } from "./shared/model.js";
 import { put, get } from "./shared/storage.js";
 import { extractTitle, renderArticle, imagePaths } from "./shared/content.js";
@@ -178,17 +179,19 @@ function render() {
     mountPreviews();
     return;
   }
-  app.innerHTML = headerBar() + `<main><section class="intro"><div><div class="eyebrow">YOUR CONTENT, EVERYWHERE</div><h1>写一份，在每个平台继续打磨。</h1><p>文章与视频统一导入，自动适配到草稿。最后一点表达，留在平台里完成。</p></div><span class="local-label">${icon("shield")} 素材保存在本地</span></section>${currentView()}<nav class="steps" aria-label="发布步骤">${[1, 2, 3, 4].map((n) => `<button class="step ${state.step === n ? "active" : state.step > n ? "done" : ""}" data-step="${n}" aria-current="${state.step === n ? "step" : "false"}"><span class="step-num">${state.step > n ? "✓" : String(n).padStart(2, "0")}</span><span><span class="step-title">${stageLabel(n)}</span><span class="step-desc">${["", "文章、图片或视频", "预览与轻量调整", "保存到各平台", "打开草稿继续编辑"][n]}</span></span></button>`).join("")}</nav><div id="error">${error ? `<div role="alert" class="error">${esc(error)}</div>` : ""}</div><div class="workspace"><section class="panel"><div class="panel-head"><span class="panel-title">${icon(state.step === 1 ? "file" : state.step === 4 ? "link" : "spark")}${["", "开始准备你的内容", "为每个平台，稍作调整", "把内容送到草稿箱", "草稿就绪，接着打磨"][state.step]}</span><span class="panel-note">STEP ${String(state.step).padStart(2, "0")} / 04</span></div><div class="panel-body">${[null, importView, tailorView, pushView, resultView][state.step]()}</div><footer class="panel-footer"><span class="saved">${state.step === 1 ? "修改自动保存在当前浏览器" : state.step === 2 ? "原文保留，每个平台单独调整" : state.step === 3 ? "仅生成草稿，不公开发布" : "表达的最后一步，留给你"}</span><div style="display:flex;gap:10px">${state.step > 1 ? '<button class="quiet" data-action="back">上一步</button>' : ""}${state.step < 3 ? `<button class="primary" data-action="next">${state.step === 1 ? "选择发布平台" : "准备推送草稿"} ${icon("arrow")}</button>` : state.step === 3 ? `<button class="primary" data-action="push" ${job() || !extension ? "disabled" : ""}>${job() ? "正在处理 / 已处理" : "推送到所选草稿"} ${icon("arrow")}</button>` : '<button class="primary" data-action="new">准备下一份内容 ＋</button>'}</div></footer></section><aside><section class="panel preview-panel"><div class="panel-head"><span class="panel-title">平台预览</span><span class="panel-note">呈现效果参考</span></div><div class="panel-body"><div class="preview-switches">${Object.keys(
-    PLATFORMS,
-  )
-    .filter((p) => PLATFORMS[p].kinds.includes(state.kind))
-    .map(
-      (p) =>
-        `<button class="${state.previewPlatform === p ? "active" : ""}" data-preview="${p}">${PLATFORMS[p].short}</button>`,
+  app.innerHTML =
+    headerBar() +
+    `<main><section class="intro"><div><div class="eyebrow">YOUR CONTENT, EVERYWHERE</div><h1>写一份，在每个平台继续打磨。</h1><p>文章与视频统一导入，自动适配到草稿。最后一点表达，留在平台里完成。</p></div><span class="local-label">${icon("shield")} 素材保存在本地</span></section>${currentView()}<nav class="steps" aria-label="发布步骤">${[1, 2, 3, 4].map((n) => `<button class="step ${state.step === n ? "active" : state.step > n ? "done" : ""}" data-step="${n}" aria-current="${state.step === n ? "step" : "false"}"><span class="step-num">${state.step > n ? "✓" : String(n).padStart(2, "0")}</span><span><span class="step-title">${stageLabel(n)}</span><span class="step-desc">${["", "文章、图片或视频", "预览与轻量调整", "保存到各平台", "打开草稿继续编辑"][n]}</span></span></button>`).join("")}</nav><div id="error">${error ? `<div role="alert" class="error">${esc(error)}</div>` : ""}</div><div class="workspace"><section class="panel"><div class="panel-head"><span class="panel-title">${icon(state.step === 1 ? "file" : state.step === 4 ? "link" : "spark")}${["", "开始准备你的内容", "为每个平台，稍作调整", "把内容送到草稿箱", "草稿就绪，接着打磨"][state.step]}</span><span class="panel-note">STEP ${String(state.step).padStart(2, "0")} / 04</span></div><div class="panel-body">${[null, importView, tailorView, pushView, resultView][state.step]()}</div><footer class="panel-footer"><span class="saved">${state.step === 1 ? "修改自动保存在当前浏览器" : state.step === 2 ? "原文保留，每个平台单独调整" : state.step === 3 ? "仅生成草稿，不公开发布" : "表达的最后一步，留给你"}</span><div style="display:flex;gap:10px">${state.step > 1 ? '<button class="quiet" data-action="back">上一步</button>' : ""}${state.step < 3 ? `<button class="primary" data-action="next">${state.step === 1 ? "选择发布平台" : "准备推送草稿"} ${icon("arrow")}</button>` : state.step === 3 ? `<button class="primary" data-action="push" ${job() || !extension ? "disabled" : ""}>${job() ? "正在处理 / 已处理" : "推送到所选草稿"} ${icon("arrow")}</button>` : '<button class="primary" data-action="new">准备下一份内容 ＋</button>'}</div></footer></section><aside><section class="panel preview-panel"><div class="panel-head"><span class="panel-title">平台预览</span><span class="panel-note">呈现效果参考</span></div><div class="panel-body"><div class="preview-switches">${Object.keys(
+      PLATFORMS,
     )
-    .join(
-      "",
-    )}</div><div class="phone"><div class="phone-bar"><span>‹</span><strong>${PLATFORMS[state.previewPlatform]?.name || "内容预览"}</strong><span>•••</span></div><div class="phone-content" id="platform-preview"></div></div><div class="preview-foot">最终样式以平台编辑器为准 · 原文始终保留</div></div></section><section class="ai-note"><h3>${icon("spark")} 也可以交给 AI</h3><p>Agent 通过本地 CLI 推送草稿，再把编辑入口交还给你。</p><code class="code">omnipost draft article.md<br>--platforms wechat,xiaohongshu,x</code></section></aside></div><div id="job-history">${historyView()}</div><p class="bottom-note">一份内容，几处草稿。打开平台，再做一点自己的调整。</p></main>${settingsView()}<input hidden id="files" type="file" accept=".md,.markdown,image/*,video/*" multiple><input hidden id="folder" type="file" webkitdirectory multiple>`;
+      .filter((p) => PLATFORMS[p].kinds.includes(state.kind))
+      .map(
+        (p) =>
+          `<button class="${state.previewPlatform === p ? "active" : ""}" data-preview="${p}">${PLATFORMS[p].short}</button>`,
+      )
+      .join(
+        "",
+      )}</div><div class="phone"><div class="phone-bar"><span>‹</span><strong>${PLATFORMS[state.previewPlatform]?.name || "内容预览"}</strong><span>•••</span></div><div class="phone-content" id="platform-preview"></div></div><div class="preview-foot">最终样式以平台编辑器为准 · 原文始终保留</div></div></section><section class="ai-note"><h3>${icon("spark")} 也可以交给 AI</h3><p>Agent 通过本地 CLI 推送草稿，再把编辑入口交还给你。</p><code class="code">omnipost draft article.md<br>--platforms wechat,xiaohongshu,x</code></section></aside></div><div id="job-history">${historyView()}</div><p class="bottom-note">一份内容，几处草稿。打开平台，再做一点自己的调整。</p></main>${settingsView()}<input hidden id="files" type="file" accept=".md,.markdown,image/*,video/*" multiple><input hidden id="folder" type="file" webkitdirectory multiple>`;
   renderPreview();
   bindFiles();
 }
@@ -245,6 +248,7 @@ function resultView() {
   return `<div class="completion"><div class="big-success">${count ? "✓" : "…"}</div><h2>${count ? count + " 份草稿，等待你的最后一点调整" : "还没有生成草稿"}</h2><p>${count ? "在各个平台里，保留最适合那里的表达。" : "完成前三步后，草稿的编辑入口会出现在这里。"}</p></div>${cards()}`;
 }
 function repliesSection() {
+  if (!X_REPLY_ENABLED) return "";
   const replies = jobs.filter((j) => j.kind === "x_reply");
   if (!replies.length) return "";
   return `<section class="history-list" aria-label="X 回复待审阅"><p class="saved">X 回复待审阅</p>${replies
@@ -438,8 +442,7 @@ async function importFiles(files) {
       state.platforms = state.platforms.filter((p) =>
         PLATFORMS[p].kinds.includes(state.kind),
       );
-    if (!state.platforms.length)
-      state.platforms = platformsFor(state.kind);
+    if (!state.platforms.length) state.platforms = platformsFor(state.kind);
     state.previewPlatform = state.platforms[0];
     state.tailorPlatform = state.platforms[0];
     state.jobId = null;
@@ -541,8 +544,7 @@ app.addEventListener("click", async (e) => {
           platform,
           kind: item?.kind || "video",
         });
-      }
-      else if (b.dataset.sync === "open")
+      } else if (b.dataset.sync === "open")
         await send("OPEN", { id, platform });
       else await send("RUN_PLATFORM", { id, platform });
       await refresh();
@@ -812,8 +814,7 @@ async function mountPreviews() {
 }
 async function hydrate() {
   const job =
-    jobs.find((j) => j.id === state.jobId) ||
-    (state.bridgeJob ? state : null);
+    jobs.find((j) => j.id === state.jobId) || (state.bridgeJob ? state : null);
   for (const a of state.assets) {
     if (urls.has(a.id)) continue;
     try {

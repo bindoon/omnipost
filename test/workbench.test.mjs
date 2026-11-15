@@ -83,26 +83,35 @@ test("完整工作台先按视频或文章列出平台状态", async () => {
       "utf8",
     )
   ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
-  vm.runInContext(source, vm.createContext({
-    document,
-    window: { scrollTo() {} },
-    location: { search: "", href: "http://127.0.0.1/workbench.html" },
-    URL,
-    URLSearchParams,
-    crypto,
-    console,
-    ...model,
-    extractTitle: content.extractTitle,
-    imagePaths: content.imagePaths,
-    renderArticle: (md, assets) => content.renderArticle(md, assets, DOMParser),
-    get: async () => undefined,
-    put: async () => {},
-    localStorage: { getItem: () => null, setItem() {} },
-    setTimeout,
-    clearTimeout,
-  }));
+  vm.runInContext(
+    source,
+    vm.createContext({
+      document,
+      window: { scrollTo() {} },
+      location: { search: "", href: "http://127.0.0.1/workbench.html" },
+      URL,
+      URLSearchParams,
+      crypto,
+      console,
+      ...model,
+      extractTitle: content.extractTitle,
+      imagePaths: content.imagePaths,
+      renderArticle: (md, assets) =>
+        content.renderArticle(md, assets, DOMParser),
+      get: async () => undefined,
+      put: async () => {},
+      localStorage: { getItem: () => null, setItem() {} },
+      setTimeout,
+      clearTimeout,
+    }),
+  );
   await new Promise(setImmediate);
-  assert.equal(document.querySelector("[data-library=video]").getAttribute("aria-selected"), "true");
+  assert.equal(
+    document
+      .querySelector("[data-library=video]")
+      .getAttribute("aria-selected"),
+    "true",
+  );
   assert.equal(document.querySelectorAll("[data-step]").length, 0);
   assert.match(document.body.textContent, /还没有视频/);
   document.querySelector("[data-library=article]").click();
@@ -141,6 +150,17 @@ test("视频读不到时列表显示封面，并可以删除这条草稿", async
         },
       ],
     },
+    {
+      id: "x-reply-1",
+      kind: "x_reply",
+      title: "回复 @frankqianchen",
+      description: "一条待审回复",
+      createdAt: "2026-11-09T02:15:18.000Z",
+      targetUrl: "https://x.com/frankqianchen/status/1",
+      platforms: ["x"],
+      results: { x: { state: "review_ready", message: "待审阅" } },
+      assets: [],
+    },
   ];
   const deleted = [];
   const source = (
@@ -169,7 +189,8 @@ test("视频读不到时列表显示封面，并可以删除这条草稿", async
       ...model,
       extractTitle: content.extractTitle,
       imagePaths: content.imagePaths,
-      renderArticle: (md, assets) => content.renderArticle(md, assets, DOMParser),
+      renderArticle: (md, assets) =>
+        content.renderArticle(md, assets, DOMParser),
       get: async (store, id) =>
         store === "assets" && id === "cover-1"
           ? new Blob(["png"], { type: "image/png" })
@@ -192,7 +213,12 @@ test("视频读不到时列表显示封面，并可以删除这条草稿", async
           },
         },
         storage: {
-          local: { async get() { return {}; }, set() {} },
+          local: {
+            async get() {
+              return {};
+            },
+            set() {},
+          },
           onChanged: { addListener() {} },
         },
       },
@@ -200,6 +226,8 @@ test("视频读不到时列表显示封面，并可以删除这条草稿", async
   );
   await new Promise(setImmediate);
   await new Promise(setImmediate);
+  assert.equal(document.querySelector('[aria-label="X 回复待审阅"]'), null);
+  assert.doesNotMatch(document.body.textContent, /回复 @frankqianchen/);
   const preview = document.querySelector("[data-preview-for=v1]");
   assert.equal(preview.querySelector("img").getAttribute("src"), "blob:cover");
   assert.match(preview.textContent, /浏览器里没有这份视频/);
