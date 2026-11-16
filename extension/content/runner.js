@@ -714,6 +714,137 @@
       resume: { title: task.title, kind: task.kind },
     };
   }
+  function coverFile(task, roles) {
+    for (const role of roles) {
+      const asset = task.assets?.find((a) => a.role === role);
+      if (asset) return asset;
+    }
+    return null;
+  }
+  function controlByText(texts, root = document) {
+    const names = Array.isArray(texts) ? texts : [texts];
+    const hit = exact(names, root);
+    if (hit) return hit;
+    const els = queryAll(
+      "button,[role=button],a,label,span,div",
+      root,
+    ).filter(visible);
+    for (const name of names) {
+      const match = els
+        .filter(
+          (el) => norm(el.textContent).replace(/^\+\s*/, "") === name,
+        )
+        .sort(
+          (a, b) =>
+            a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+        )[0];
+      if (match) return match.closest("button,[role=button],a,label") || match;
+    }
+    return null;
+  }
+  function coverDialog() {
+    return queryAll("div,section,[role=dialog]")
+      .filter((el) => {
+        if (!visible(el)) return false;
+        const text = norm(el.textContent);
+        return (
+          text.length < 1500 && /上传/.test(text) && /完成|确认|确定/.test(text)
+        );
+      })
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      )[0];
+  }
+  async function uploadCoverDialog(task, asset) {
+    const dialog = await wait(
+      () => coverDialog(),
+      "封面编辑窗口没有打开",
+      8000,
+    );
+    let input = inputFor("image", dialog);
+    if (!input) {
+      const button = controlByText(
+        ["上传封面", "上传图片", "本地上传", "上传"],
+        dialog,
+      );
+      if (!button) attention("封面窗口里没有上传按钮");
+      click(button);
+      input = await wait(
+        () => inputFor("image", coverDialog() || dialog),
+        "未找到封面文件选择框",
+        8000,
+      );
+    }
+    await upload(input, await file(task, asset));
+    await sleep(400);
+    const done = controlByText(
+      ["完成", "确认", "确定"],
+      coverDialog() || dialog,
+    );
+    if (!done) attention("封面已选择，但窗口里没有确认按钮");
+    click(done);
+    await wait(
+      () => !coverDialog(),
+      "封面窗口没有关闭，请在页面上确认封面",
+      8000,
+    );
+  }
+  async function uploadChosenCover(task, openers) {
+    const asset = coverFile(task, [
+      "cover-portrait",
+      "cover",
+      "cover-landscape",
+    ]);
+    if (!asset) return false;
+    await status(task, "filling", "上传封面");
+    const opener = controlByText(openers);
+    if (!opener) attention("未找到封面入口，请在页面上打开封面编辑");
+    click(opener);
+    await uploadCoverDialog(task, asset);
+    return true;
+  }
+  function coverEdit(label) {
+    const seed = queryAll("div,span,p,li,section,button")
+      .filter((el) => {
+        const text = norm(el.textContent);
+        return text === label || text.startsWith(label + " ");
+      })
+      .sort(
+        (a, b) => norm(a.textContent).length - norm(b.textContent).length,
+      )[0];
+    if (!seed) return null;
+    let node = seed;
+    for (let i = 0; i < 8 && node; i++) {
+      const edit = [...node.querySelectorAll("button,div,span,[role=button]")].find(
+        (el) => {
+          const text = norm(el.textContent);
+          return text === "编辑" || text === "编辑封面";
+        },
+      );
+      if (edit) return edit.closest("button,[role=button]") || edit;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  async function uploadChannelCovers(task) {
+    const slots = [
+      [["cover-portrait", "cover"], "个人主页卡片"],
+      [["cover-landscape"], "分享卡片"],
+    ];
+    let count = 0;
+    for (const [roles, label] of slots) {
+      const asset = coverFile(task, roles);
+      if (!asset) continue;
+      if (!count) await status(task, "filling", "上传封面");
+      const edit = coverEdit(label);
+      if (!edit) attention("未找到视频号「" + label + "」封面");
+      click(edit);
+      await uploadCoverDialog(task, asset);
+      count++;
+    }
+    return count;
+  }
   async function video(task) {
     auth();
     if (task.fillOnly) {
@@ -786,11 +917,17 @@
         compact(plainText(desc)) !== compact(task.description || "")
       )
         attention("平台仍在初始化视频文案，请检查保留的页面");
+      const covered = await uploadChosenCover(task, [
+        "编辑封面",
+        "设置封面",
+        "修改封面",
+      ]);
       if (task.fillOnly)
-        attention("视频与文案已填入；请检查封面和 AI 声明后自行保存或发布");
-      const cover = task.assets.find((a) => a.role.startsWith("cover"));
-      if (cover)
-        attention("视频已上传并填入文案，请在平台设置封面后点“暂存离开”");
+        attention(
+          covered
+            ? "视频、文案和封面已填入；请检查 AI 声明后自行保存或发布"
+            : "视频与文案已填入；请检查封面和 AI 声明后自行保存或发布",
+        );
       const saved = await saveXhs(task);
       if (task.aiGenerated) saved.warnings = ["发布前请在平台确认 AI 内容声明"];
       return saved;
@@ -824,9 +961,12 @@
       textField(desc, task.description || task.title);
       const title = editable().find((el) => /短标题|概括视频/.test(hintOf(el)));
       if (title) textField(title, task.title);
+      const covered = await uploadChannelCovers(task);
       if (task.fillOnly)
         attention(
-          "视频与文案已填入；请检查上传进度、短标题、横竖封面和 AI 声明后自行保存或发布",
+          covered
+            ? "视频、文案和封面已填入；请检查上传进度和 AI 声明后自行保存或发布"
+            : "视频与文案已填入；请检查上传进度、短标题和 AI 声明后自行保存或发布",
         );
       const save = exact(["保存草稿", "暂存离开"]);
       if (!save)
@@ -861,7 +1001,16 @@
           title,
           [task.title, task.description].filter(Boolean).join("\n"),
         );
-      attention("视频与文案已填入抖音；请检查封面和话题后自行发布");
+      const covered = await uploadChosenCover(task, [
+        "选择封面",
+        "编辑封面",
+        "设置封面",
+      ]);
+      attention(
+        covered
+          ? "视频、文案和封面已填入抖音；请检查话题后自行发布"
+          : "视频与文案已填入抖音；请检查封面和话题后自行发布",
+      );
     }
     const editor = await wait(
       () => field('[data-testid="tweetTextarea_0"][contenteditable=true]'),

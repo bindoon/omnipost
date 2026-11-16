@@ -120,8 +120,16 @@ function persist() {
     else localStorage.setItem("publisher-preview", JSON.stringify(state));
   }, 300);
 }
+function connectionMarkup() {
+  const text = bridge.connected
+    ? "AI 已连接"
+    : bridge.paired
+      ? "正在连接 AI"
+      : "AI 未连接";
+  return `<i class="status-dot ${bridge.connected ? "online" : ""}"></i>${text}`;
+}
 function headerBar() {
-  return `<header class="top"><div class="brand"><span class="brand-mark">O</span><span>Omnipost</span><span class="top-label">PUBLISH, THEN REFINE.</span></div><div class="top-actions">${!extension ? '<span class="preview-mode">界面预览</span>' : ""}<button class="quiet" data-action="library">内容列表</button><span class="connection"><i class="status-dot ${bridge.connected ? "online" : ""}"></i>${bridge.connected ? "AI 已连接" : "AI 未连接"}</span><button class="quiet" data-action="settings">${icon("spark")} 连接 AI</button></div></header>`;
+  return `<header class="top"><div class="brand"><span class="brand-mark">O</span><span>Omnipost</span><span class="top-label">PUBLISH, THEN REFINE.</span></div><div class="top-actions">${!extension ? '<span class="preview-mode">界面预览</span>' : ""}<button class="quiet" data-action="library">内容列表</button><span class="connection">${connectionMarkup()}</span><button class="quiet" data-action="settings">${icon("spark")} 连接 AI</button></div></header>`;
 }
 function coverAsset(job) {
   const covers = (job?.assets || []).filter((a) => a.role?.startsWith("cover"));
@@ -288,7 +296,8 @@ function historyView() {
   );
 }
 function settingsView() {
-  return `<dialog id="settings"><h2>把 AI 接到 Omnipost</h2><p>本地桥接服务接收 Agent 的任务。平台登录和草稿操作仍在你的 Chrome 中完成。</p><code class="code">omnipost serve<br>omnipost pair</code><label class="field-label" for="bridge-url">本地服务地址</label><input class="text-input" id="bridge-url" value="http://127.0.0.1:4318"><label class="field-label" for="bridge-token">连接令牌</label><input class="text-input" id="bridge-token" type="password" autocomplete="off" placeholder="粘贴 pair 命令返回的令牌"><p>令牌只保存在本机。连接后，AI 可以提交草稿任务、查看状态和打开编辑器。</p><div id="connect-error" class="error hidden"></div><footer><button class="quiet" data-action="close-settings">稍后连接</button><button class="primary" data-action="connect">连接本地 AI</button></footer></dialog>`;
+  const paired = bridge.paired;
+  return `<dialog id="settings"><h2>把 AI 接到 Omnipost</h2><p>${paired ? "令牌已保存在这台电脑上。本机服务在运行时，扩展会自己连上，不用每次再运行 omnipost pair，也不用再粘贴令牌。" : "第一次把令牌粘贴到下面。保存之后，只要本机服务在运行，扩展会自动连接。"}平台登录和草稿操作仍在你的 Chrome 中完成。</p><code class="code">omnipost serve${paired ? "" : "<br>omnipost pair"}</code><label class="field-label" for="bridge-url">本地服务地址</label><input class="text-input" id="bridge-url" value="http://127.0.0.1:4318"><label class="field-label" for="bridge-token">连接令牌</label><input class="text-input" id="bridge-token" type="password" autocomplete="off" placeholder="${paired ? "已保存，留空则继续使用" : "粘贴 pair 命令返回的令牌"}"><p>令牌只保存在本机。连接后，AI 可以提交草稿任务、查看状态和打开编辑器。</p><div id="connect-error" class="error hidden"></div><footer><button class="quiet" data-action="close-settings">稍后连接</button><button class="primary" data-action="connect">${paired ? "重新连接" : "连接本地 AI"}</button></footer></dialog>`;
 }
 function renderPreview() {
   const el = document.querySelector("#platform-preview");
@@ -946,12 +955,7 @@ async function refresh() {
         app.querySelector("#job-history").innerHTML = historyView();
       }
       const label = app.querySelector(".connection");
-      if (label)
-        label.innerHTML =
-          '<i class="status-dot ' +
-          (bridge.connected ? "online" : "") +
-          '"></i>' +
-          (bridge.connected ? "AI 已连接" : "AI 未连接");
+      if (label) label.innerHTML = connectionMarkup();
     }
   } catch (e) {
     fail(e);
@@ -995,6 +999,22 @@ async function init() {
     chrome.storage.onChanged.addListener((c) => {
       if (c["publisher.lastUpdate"]) refresh();
     });
+    if (typeof setInterval === "function")
+      setInterval(() => {
+        if (bridge.connected) return;
+        send("ENSURE_BRIDGE")
+          .then((r) => {
+            if (!r?.bridge) return;
+            const changed =
+              r.bridge.connected !== bridge.connected ||
+              r.bridge.paired !== bridge.paired;
+            bridge = r.bridge;
+            if (!changed) return;
+            const label = document.querySelector(".connection");
+            if (label) label.innerHTML = connectionMarkup();
+          })
+          .catch(() => {});
+      }, 3000);
   }
 }
 init();

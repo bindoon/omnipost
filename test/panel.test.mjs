@@ -11,10 +11,21 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   );
   const jobs = [
     {
+      id: "old",
+      kind: "video",
+      title: "旧视频",
+      description: "更早的一条",
+      createdAt: "2026-11-01T00:00:00.000Z",
+      platforms: ["douyin"],
+      results: { douyin: { state: "ready", message: "待填充" } },
+      assets: [],
+    },
+    {
       id: "v1",
       kind: "video",
       title: "虚与实到底是什么",
       description: "虚，就是气血少",
+      createdAt: "2026-11-16T00:00:00.000Z",
       platforms: ["douyin"],
       results: { douyin: { state: "ready", message: "待填充" } },
       assets: [
@@ -73,6 +84,7 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
         tabs: {
           query: async () => [{ id: 7 }],
           onUpdated: { addListener() {} },
+          onActivated: { addListener() {} },
         },
         storage: { onChanged: { addListener() {} } },
       },
@@ -80,6 +92,10 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   );
   await new Promise(setImmediate);
   await new Promise(setImmediate);
+  assert.deepEqual(
+    [...document.querySelectorAll("h2")].map((el) => el.textContent),
+    ["虚与实到底是什么", "旧视频"],
+  );
   const thumb = document.querySelector("[data-thumb-for=v1]");
   assert.equal(thumb.querySelector("img").getAttribute("src"), "blob:thumb");
   assert.equal(document.querySelector("[data-delete]"), null);
@@ -136,7 +152,10 @@ test("公众号侧栏在草稿列表提供新建引导，进入文章编辑器�
           return { ok: true };
         },
       },
-      tabs: { onUpdated: { addListener: (fn) => (updated = fn) } },
+      tabs: {
+        onUpdated: { addListener: (fn) => (updated = fn) },
+        onActivated: { addListener() {} },
+      },
       storage: { onChanged: { addListener() {} } },
     },
   });
@@ -159,4 +178,64 @@ test("公众号侧栏在草稿列表提供新建引导，进入文章编辑器�
   await new Promise(setImmediate);
   assert.equal(sent.find((m) => m.type === "FILL_CURRENT").tabId, 7);
   assert.match(document.body.textContent, /复制微信正文/);
+});
+
+test("跳到发布页时侧栏跟着当前标签更新，不用关掉再打开", async () => {
+  const { document } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const jobs = [
+    {
+      id: "new-video",
+      kind: "video",
+      title: "手麻，都是气血不通吗",
+      createdAt: "2026-11-16T00:00:00.000Z",
+      platforms: ["douyin"],
+      results: { douyin: { state: "ready" } },
+      assets: [],
+    },
+  ];
+  let tabId = 3;
+  let activated;
+  const source = (
+    await fs.readFile(new URL("../extension/panel.js", import.meta.url), "utf8")
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  vm.runInNewContext(source, {
+    document,
+    location: { search: "?tabId=3" },
+    URLSearchParams,
+    URL,
+    console,
+    ...model,
+    chrome: {
+      runtime: {
+        sendMessage: async (message) => {
+          if (message.type === "STATE") return { ok: true, jobs };
+          if (message.type === "TARGET")
+            return {
+              ok: true,
+              target:
+                tabId === 9
+                  ? { id: 9, platform: "douyin", role: "editor" }
+                  : { id: tabId, role: "other", platform: null },
+            };
+          return { ok: true };
+        },
+      },
+      tabs: {
+        query: async () => [{ id: tabId }],
+        onUpdated: { addListener() {} },
+        onActivated: { addListener: (fn) => (activated = fn) },
+      },
+      storage: { onChanged: { addListener() {} } },
+    },
+  });
+  await new Promise(setImmediate);
+  assert.match(document.body.textContent, /当前页不是支持的发布页/);
+  tabId = 9;
+  activated({ tabId: 9, windowId: 1 });
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  assert.match(document.body.textContent, /手麻，都是气血不通吗/);
+  assert.doesNotMatch(document.body.textContent, /当前页不是支持的发布页/);
 });

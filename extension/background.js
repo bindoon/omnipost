@@ -20,7 +20,10 @@ import { put, get, all, remove, fileChunk } from "./shared/storage.js";
 let socket,
   keepalive,
   processing = false,
-  authenticated = false;
+  authenticated = false,
+  connectTail = Promise.resolve(),
+  retryTimer = null,
+  retryDelay = 1000;
 const activeTabs = new Map();
 let queue = Promise.resolve();
 const uiSender = (sender) =>
@@ -196,16 +199,64 @@ function endpoint(value) {
     throw new Error("AI服务必须是本机 http://127.0.0.1 地址");
   return url.origin;
 }
+function bridgeOpen() {
+  return authenticated && socket?.readyState === WebSocket.OPEN;
+}
+async function loadBridgeConfig() {
+  const { bridgeConfig } = await chrome.storage.local.get("bridgeConfig");
+  return bridgeConfig?.url && bridgeConfig?.token ? bridgeConfig : null;
+}
+function scheduleRetry() {
+  clearTimeout(retryTimer);
+  const delay = retryDelay;
+  retryDelay = Math.min(retryDelay * 2, 30000);
+  retryTimer = setTimeout(() => {
+    ensureConnected().catch(() => {});
+  }, delay);
+  chrome.alarms.create("bridge-reconnect", {
+    delayInMinutes: 0.5,
+    periodInMinutes: 0.5,
+  });
+}
+function connectSerialized(config) {
+  const run = connectTail.then(async () => {
+    const root = endpoint(config.url);
+    if (
+      bridgeOpen() &&
+      socket.url === root.replace("http:", "ws:") + "/worker"
+    ) {
+      const saved = await loadBridgeConfig();
+      if (saved?.token === config.token) return;
+    }
+    await connect(config);
+  });
+  connectTail = run.catch(() => {});
+  return run;
+}
+async function ensureConnected() {
+  clearTimeout(retryTimer);
+  if (bridgeOpen()) return true;
+  const config = await loadBridgeConfig();
+  if (!config) return false;
+  try {
+    await connectSerialized(config);
+    return bridgeOpen();
+  } catch {
+    return false;
+  }
+}
 async function connect(config) {
-  authenticated = false;
-  if (socket) socket.close();
-  clearInterval(keepalive);
   const root = endpoint(config.url);
   if (!/^[a-f0-9]{64}$/.test(config.token))
     throw new Error("连接令牌格式不正确");
   await chrome.storage.local.set({
     bridgeConfig: { url: root, token: config.token },
   });
+  authenticated = false;
+  clearInterval(keepalive);
+  const previous = socket;
+  socket = null;
+  previous?.close();
   socket = new WebSocket(root.replace("http:", "ws:") + "/worker");
   const current = socket;
   socket.onopen = () =>
@@ -222,10 +273,12 @@ async function connect(config) {
       const m = JSON.parse(event.data);
       if (m.type === "hello") {
         authenticated = true;
+        retryDelay = 1000;
+        clearTimeout(retryTimer);
         keepalive = setInterval(() => {
           if (current.readyState === WebSocket.OPEN)
             current.send(JSON.stringify({ type: "ping" }));
-        }, 20000);
+        }, 10000);
         await chrome.storage.local.set({ bridgeConnected: true });
         await announce();
       }
@@ -262,14 +315,17 @@ async function connect(config) {
     authenticated = false;
     clearInterval(keepalive);
     await chrome.storage.local.set({ bridgeConnected: false });
+    if (socket !== current) return;
     await announce();
+    if (socket !== current) return;
+    scheduleRetry();
   };
   socket.onerror = () => {};
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("无法连接本地 AI 服务，请确认 serve 正在运行")),
-      5000,
-    );
+    const timer = setTimeout(() => {
+      reject(new Error("无法连接本地 AI 服务，请确认 serve 正在运行"));
+      if (socket === current) current.close();
+    }, 5000);
     current.addEventListener(
       "message",
       (e) => {
@@ -440,13 +496,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       await announce();
       return { ok: true };
     }
-    if (message.type === "STATE") {
+    if (message.type === "STATE" || message.type === "ENSURE_BRIDGE") {
+      const saved = await loadBridgeConfig();
+      if (message.type === "ENSURE_BRIDGE") await ensureConnected();
+      else if (saved && !bridgeOpen()) ensureConnected().catch(() => {});
       return {
         ok: true,
-        jobs: await all("jobs"),
-        bridge: {
-          connected: authenticated && socket?.readyState === WebSocket.OPEN,
-        },
+        jobs: message.type === "STATE" ? await all("jobs") : undefined,
+        bridge: { connected: bridgeOpen(), paired: Boolean(saved) },
       };
     }
     if (message.type === "FILL_CURRENT") {
@@ -574,7 +631,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       return { ok: true };
     }
     if (message.type === "CONNECT") {
-      await connect(message);
+      const saved = await loadBridgeConfig();
+      const token = String(message.token || "").trim() || saved?.token;
+      const url = String(message.url || "").trim() || saved?.url;
+      if (!token || !url)
+        throw new Error(
+          "还没有连接令牌。在终端运行一次 omnipost pair，把令牌粘贴到这里。保存后会自动连接，不用每次再配对。",
+        );
+      await connectSerialized({ url, token });
       return { ok: true };
     }
     if (message.type === "OPEN") {
@@ -626,17 +690,11 @@ chrome.action.onClicked.addListener((tab) => {
   if (surfaceFor(tab?.url) === "panel") return openPanel(tab);
   return openWorkbench().catch(console.error);
 });
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (
-    alarm.name !== "bridge-reconnect" ||
-    socket?.readyState === WebSocket.OPEN ||
-    socket?.readyState === WebSocket.CONNECTING
-  )
-    return;
-  const { bridgeConfig: c } = await chrome.storage.local.get("bridgeConfig");
-  if (c) connect(c).catch(() => {});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== "bridge-reconnect" || bridgeOpen()) return;
+  ensureConnected().catch(() => {});
 });
-chrome.alarms.create("bridge-reconnect", { periodInMinutes: 1 });
+chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });
 (async () => {
   for (const j of await all("jobs")) {
     let changed = false;
@@ -649,6 +707,5 @@ chrome.alarms.create("bridge-reconnect", { periodInMinutes: 1 });
     }
     if (changed) await save(j);
   }
-  const { bridgeConfig: c } = await chrome.storage.local.get("bridgeConfig");
-  if (c) connect(c).catch(() => {});
+  ensureConnected().catch(() => {});
 })();

@@ -43,7 +43,42 @@ export async function startBridge({
   let worker = null,
     active = null,
     closing = false,
+    seenAt = 0,
     persistence = Promise.resolve();
+  const staleMs = 25000;
+  let gate = Promise.resolve();
+  const lock = (fn) => {
+    const run = gate.then(() => fn());
+    gate = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  };
+  const responded = (target) => {
+    if (!target || target.readyState !== WebSocket.OPEN)
+      return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 800);
+      target.once("pong", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      try {
+        target.ping();
+      } catch {
+        clearTimeout(timer);
+        resolve(false);
+      }
+    });
+  };
+  const heartbeat = setInterval(() => {
+    if (!worker || !seenAt || Date.now() - seenAt < staleMs) return;
+    const stale = worker;
+    seenAt = 0;
+    stale.terminate();
+  }, 5000);
+  heartbeat.unref?.();
   for (const name of await fs.readdir(jobsDir)) {
     if (!name.endsWith(".json")) continue;
     try {
@@ -288,20 +323,34 @@ export async function startBridge({
             return;
           }
           if (!authenticated) {
-            if (m.type !== "hello" || !equal(m.token, config.token) || worker) {
-              ws.close(1008, "Unauthorized or worker already connected");
-              return;
-            }
-            authenticated = true;
-            clearTimeout(timer);
-            worker = ws;
-            workerCapabilities = Array.isArray(m.capabilities)
-              ? m.capabilities
-              : [];
-            ws.send(JSON.stringify({ type: "hello", ok: true }));
-            await dispatch();
+            await lock(async () => {
+              if (m.type !== "hello" || !equal(m.token, config.token)) {
+                ws.close(1008, "Unauthorized or worker already connected");
+                return;
+              }
+              if (worker && worker !== ws) {
+                const previous = worker;
+                if (await responded(previous)) {
+                  ws.close(1008, "Unauthorized or worker already connected");
+                  return;
+                }
+                previous.terminate();
+                if (worker === previous) worker = null;
+              }
+              if (ws.readyState !== WebSocket.OPEN) return;
+              authenticated = true;
+              clearTimeout(timer);
+              seenAt = Date.now();
+              worker = ws;
+              workerCapabilities = Array.isArray(m.capabilities)
+                ? m.capabilities
+                : [];
+              ws.send(JSON.stringify({ type: "hello", ok: true }));
+              await dispatch();
+            });
             return;
           }
+          seenAt = Date.now();
           if (m.type === "ping") {
             ws.send(JSON.stringify({ type: "pong" }));
             return;
@@ -398,6 +447,7 @@ export async function startBridge({
     jobs,
     async close() {
       closing = true;
+      clearInterval(heartbeat);
       for (const ws of sockets.clients) ws.terminate();
       await new Promise((resolve) => server.close(resolve));
       await new Promise((resolve) => sockets.close(resolve));

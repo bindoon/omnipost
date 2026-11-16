@@ -172,20 +172,33 @@ async function showCover(jobId, assetId) {
   );
   dialog.showModal();
 }
-async function load() {
+let loadToken = 0;
+async function followActiveTab() {
+  if (!chrome.tabs?.query) return;
   try {
-    if (!tabId) {
-      const [active] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
-      tabId = active?.id;
-    }
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (tab?.id) tabId = tab.id;
+  } catch {}
+}
+async function load() {
+  const token = ++loadToken;
+  try {
+    await followActiveTab();
     const state = await send("STATE");
-    jobs = state.jobs || [];
-    target = tabId ? (await send("TARGET", { tabId })).target : null;
+    const nextTarget = tabId ? (await send("TARGET", { tabId })).target : null;
+    if (token !== loadToken) return;
+    jobs = (state.jobs || [])
+      .slice()
+      .sort((a, b) =>
+        String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+      );
+    target = nextTarget;
     error = "";
   } catch (e) {
+    if (token !== loadToken) return;
     error = e.message;
   }
   render();
@@ -221,8 +234,13 @@ app.addEventListener("click", async (e) => {
     render();
   }
 });
+chrome.tabs.onActivated.addListener((info) => {
+  tabId = info.tabId;
+  load();
+});
 chrome.tabs.onUpdated.addListener((id, info) => {
-  if (id === tabId && info.status === "complete") load();
+  if (id !== tabId) return;
+  if (info.status === "complete" || info.url) load();
 });
 chrome.storage.onChanged.addListener((changes) => {
   if (changes["publisher.lastUpdate"]) load();

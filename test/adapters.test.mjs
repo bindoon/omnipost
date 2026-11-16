@@ -858,3 +858,223 @@ test("小红书视频等上传封面就绪后再填文案，并通过组件内�
   assert.equal(response.result.postId, "video-native");
   assert.match(response.result.warnings[0], /AI 内容声明/);
 });
+
+function mountRunner(href) {
+  const { document, window } = parseHTML("<html><body></body></html>");
+  window.HTMLElement.prototype.getBoundingClientRect = () => ({
+    width: 120,
+    height: 36,
+  });
+  window.HTMLElement.prototype.focus = () => {};
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  Object.defineProperty(document.body, "innerText", {
+    get() {
+      return this.textContent;
+    },
+  });
+  document.createRange = () => ({ selectNodeContents() {}, collapse() {} });
+  document.execCommand = () => false;
+  const url = new URL(href);
+  let listener;
+  class Transfer {
+    constructor() {
+      this.files = [];
+      this.items = { add: (file) => this.files.push(file) };
+    }
+  }
+  class Input extends window.Event {
+    constructor(type, opts) {
+      super(type, opts);
+      this.data = opts.data;
+    }
+  }
+  const context = vm.createContext({
+    document,
+    location: { origin: url.origin, pathname: url.pathname, href },
+    chrome: {
+      runtime: {
+        onMessage: {
+          addListener(fn) {
+            listener = fn;
+          },
+        },
+        sendMessage: async (message) =>
+          message.type === "ASSET"
+            ? { ok: true, chunk: Buffer.from("cover").toString("base64") }
+            : { ok: true },
+      },
+    },
+    File,
+    DataTransfer: Transfer,
+    InputEvent: Input,
+    Event: window.Event,
+    HTMLInputElement: window.HTMLInputElement,
+    HTMLTextAreaElement: window.HTMLTextAreaElement,
+    getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    atob,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Date,
+    console,
+  });
+  vm.runInContext(source, context);
+  return {
+    document,
+    run(task) {
+      return new Promise((resolve) =>
+        listener({ type: "RUN_DRAFT", task }, {}, resolve),
+      );
+    },
+  };
+}
+function armCoverDialog(document, opener, confirmText) {
+  const names = [];
+  opener.onclick = () => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const upload = document.createElement("button");
+    upload.textContent = "上传封面";
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg";
+    input.addEventListener("change", () => names.push(input.files[0].name));
+    upload.onclick = () => {
+      if (!input.isConnected) dialog.append(input);
+    };
+    const ok = document.createElement("button");
+    ok.textContent = confirmText;
+    ok.onclick = () => dialog.remove();
+    dialog.append(upload, ok);
+    document.body.append(dialog);
+  };
+  return names;
+}
+
+test("小红书填入视频时打开封面弹窗并上传竖封面", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.xiaohongshu.com/publish/publish",
+  );
+  document.body.innerHTML =
+    '<span>草稿箱(0)</span><input type="file" accept="video/mp4"><input placeholder="填写标题"><div contenteditable="true"></div><button id="edit-cover">编辑封面</button><xhs-publish-btn save-disabled="true"></xhs-publish-btn><button id="save">暂存离开</button>';
+  const host = document.querySelector("xhs-publish-btn");
+  const names = armCoverDialog(
+    document,
+    document.querySelector("#edit-cover"),
+    "完成",
+  );
+  document.querySelector("input[type=file]").onchange = () => {
+    setTimeout(() => {
+      const preview = document.createElement("div");
+      preview.setAttribute("style", "background-image:url(https://xhscdn.com/spectrum/fixture)");
+      document.body.append(preview);
+      host.setAttribute("save-disabled", "false");
+    }, 20);
+  };
+  document.querySelector("#save").onclick = () => {
+    document.body.innerHTML =
+      '<span>草稿保存成功</span><div class="draft-item" data-draft-id="video-native"><span class="draft-title-text">视频验收</span></div>';
+  };
+  const response = await run({
+    id: "xhs-cover",
+    kind: "video",
+    platform: "xiaohongshu",
+    title: "视频验收",
+    description: "完整的视频文案",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "portrait",
+        role: "cover-portrait",
+        name: "portrait.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(response.result.state, "draft_ready", response.result.message);
+  assert.deepEqual(names, ["portrait.png"]);
+});
+
+test("视频号分别把竖封面和横封面写入两张卡片", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><div class="post-desc-box"><div contenteditable="true" data-placeholder="添加描述"></div></div><input placeholder="概括视频主要内容"><div class="cover-card"><span>个人主页卡片</span><button>编辑</button></div><div class="cover-card"><span>分享卡片</span><button>编辑</button></div>';
+  const covers = [...document.querySelectorAll(".cover-card")].map((card) =>
+    armCoverDialog(document, card.querySelector("button"), "确认"),
+  );
+  const response = await run({
+    id: "channels-cover",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "手麻都是气血不通吗",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "portrait",
+        role: "cover-portrait",
+        name: "portrait.png",
+        type: "image/png",
+        size: 5,
+      },
+      {
+        id: "landscape",
+        role: "cover-landscape",
+        name: "landscape.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /封面已填入/);
+  assert.deepEqual(covers.flat(), ["portrait.png", "landscape.png"]);
+});
+
+test("抖音填入视频时打开封面弹窗并上传封面", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/upload",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><button id="pick-cover">选择封面</button>';
+  const names = armCoverDialog(
+    document,
+    document.querySelector("#pick-cover"),
+    "完成",
+  );
+  const response = await run({
+    id: "douyin-cover",
+    kind: "video",
+    platform: "douyin",
+    fillOnly: true,
+    title: "手麻都是气血不通吗",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "portrait",
+        role: "cover-portrait",
+        name: "portrait.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /封面已填入/);
+  assert.deepEqual(names, ["portrait.png"]);
+});

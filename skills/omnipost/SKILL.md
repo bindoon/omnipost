@@ -17,7 +17,7 @@ description: Draft articles and videos to WeChat, Xiaohongshu, X, WeChat Channel
 omnipost doctor
 ```
 
-`connected` 不是 `true` 时，让用户在 Chrome 加载本仓库构建出的 `dist`，把 `omnipost pair` 的令牌贴进工作台的「连接 AI」，然后再执行。不要自己打开平台去点公开发布。
+`connected` 不是 `true` 时，先每 2 秒再查一次 `omnipost doctor`，最多等 40 秒。扩展会用已经保存的令牌自动重连。仍未连接时，请用户看工作台右上角：显示「正在连接 AI」就再等一会儿；只有从未配对时，才把 `omnipost pair` 的令牌贴进「连接 AI」一次。不要每次任务都要求重新粘贴令牌。不要自己打开平台去点公开发布。
 
 ## 交接
 
@@ -49,4 +49,4 @@ omnipost video '/绝对路径/video.mp4' \
 - `draft_ready`：平台草稿已保存，把编辑入口交给用户。
 - `needs_attention` 或 `failed`：说明卡在哪一步。不要重试已经保存成功的平台，不要为了“完成”去点发表。
 
-封面和 AI 声明留在平台里由用户确认。
+任务里带了封面图时，小红书、视频号和抖音会在封面弹窗里上传对应图片。裁切和 AI 声明仍由用户在平台确认。

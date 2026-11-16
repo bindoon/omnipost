@@ -409,6 +409,28 @@ test("删除交接记录时保留源文件", async (t) => {
   await assert.rejects(() => fs.access(path.join(dir, "jobs", "drop.json")));
 });
 
+test("已有扩展在线时拒绝第二个连接，断开后新的扩展可以接上", async (t) => {
+  const { b, root } = await fixture(t);
+  const first = await worker(t, b);
+  const intruder = new WebSocket("ws://127.0.0.1:" + b.port + "/worker");
+  t.after(() => intruder.terminate());
+  await new Promise((resolve, reject) => {
+    intruder.once("open", resolve);
+    intruder.once("error", reject);
+  });
+  const closed = new Promise((resolve) => intruder.once("close", resolve));
+  intruder.send(
+    JSON.stringify({ type: "hello", token, capabilities: ["manual-stage"] }),
+  );
+  assert.equal(await closed, 1008);
+  first.ws.close();
+  await until(async () => {
+    const health = await fetch(root + "/health");
+    return (await health.json()).connected === false;
+  });
+  await worker(t, b);
+  assert.equal((await (await fetch(root + "/health")).json()).connected, true);
+});
 test("正在交接的任务不能删除", async (t) => {
   const { b, req } = await fixture(t);
   const w = await worker(t, b);
