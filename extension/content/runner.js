@@ -7,6 +7,9 @@
     x: "https://x.com",
     channels: "https://channels.weixin.qq.com",
     douyin: "https://creator.douyin.com",
+    bilibili: "https://member.bilibili.com",
+    youtube: "https://studio.youtube.com",
+    instagram: "https://www.instagram.com",
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const norm = (s) =>
@@ -65,7 +68,11 @@
   function click(el) {
     if (!el || el.disabled || el.getAttribute("aria-disabled") === "true")
       attention("按钮尚不可用，请在平台处理后重试");
-    if (/^(发布|发表|Publish|Post)$/i.test(norm(el.textContent)))
+    if (
+      /^(发布|发表|投稿|立即投稿|分享|定时发布|Publish|Post|Share)$/i.test(
+        norm(el.textContent),
+      )
+    )
       throw new Error("草稿模式禁止公开发布");
     el.scrollIntoView({ block: "center" });
     el.click();
@@ -275,6 +282,107 @@
       patch: { state, message },
     });
   }
+  function note(task, message) {
+    if (!message) return;
+    task._notes = task._notes || [];
+    if (!task._notes.includes(message)) task._notes.push(message);
+  }
+  function withNotes(task, message) {
+    return [message, ...(task._notes || [])].filter(Boolean).join("；");
+  }
+  function hashTopics(text) {
+    const names = [];
+    for (const match of String(text || "").matchAll(/#([^\s#]+)/g))
+      if (!names.includes(match[1])) names.push(match[1]);
+    return names;
+  }
+  function withTopicSpaces(text) {
+    return String(text || "").replace(/#([^\s#]+)(?![ \t])/g, "#$1 ");
+  }
+  function tagList(task) {
+    return [
+      ...new Set(
+        [
+          ...String(task.tags || "")
+            .split(/[,，\s]+/)
+            .filter(Boolean),
+          ...hashTopics(task.description),
+        ].filter(Boolean),
+      ),
+    ];
+  }
+  function pointerClick(el) {
+    if (typeof MouseEvent === "function") {
+      const rect = el.getBoundingClientRect();
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      };
+      for (const type of ["mousedown", "mouseup", "click"])
+        el.dispatchEvent(new MouseEvent(type, init));
+    }
+    click(el);
+  }
+  function pressEnter(el) {
+    if (typeof KeyboardEvent === "function")
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    else el.dispatchEvent(new Event("confirm-tag", { bubbles: true }));
+  }
+  function hasTopic(editor, name) {
+    return queryAll(
+      "a.tiptap-topic,[data-mention],a[class*=topic]",
+      editor,
+    ).some((el) => norm(el.textContent).replace(/^#/, "") === name);
+  }
+  function findSuggestion(name) {
+    return queryAll(".item,[class*=mention-suggest-item],[class*=tag-hash]")
+      .filter(visible)
+      .filter((el) => {
+        const line = norm(el.textContent).split(" ")[0].replace(/^#/, "");
+        return line === name;
+      })
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      )[0];
+  }
+  async function confirmTopics(task, editor) {
+    const names = hashTopics(task.description || "");
+    if (!names.length || !["xiaohongshu", "douyin"].includes(task.platform))
+      return;
+    const cap = task.platform === "douyin" ? 5 : names.length;
+    for (const name of names.slice(0, cap)) {
+      if (hasTopic(editor, name)) continue;
+      const option = findSuggestion(name);
+      if (option) {
+        pointerClick(option);
+        await sleep(200);
+      }
+      if (!hasTopic(editor, name))
+        note(
+          task,
+          "话题「" + name + "」没有变成平台话题，请在页面点选同名联想",
+        );
+    }
+    if (names.length > cap) note(task, "抖音只处理前 5 个话题");
+  }
+  async function waitUploadIdle() {
+    const busy = () => /上传中|正在上传|转码中/.test(document.body.innerText);
+    if (!busy()) return;
+    await wait(
+      () =>
+        !busy() &&
+        /上传完成|上传成功|已上传|处理完成|转码完成/.test(
+          document.body.innerText,
+        ),
+      "视频仍在上传，封面要等上传完成后再设置",
+      300000,
+    );
+  }
   function result(task, evidence, draftUrl = location.href) {
     return {
       state: "draft_ready",
@@ -357,7 +465,13 @@
       "媒体仍在上传，请稍后在平台处理",
       180000,
     );
-    await sleep(500);
+    await sleep(platform === "x" ? 1200 : 500);
+  }
+  function stripSpacers(editor) {
+    for (const el of [...editor.querySelectorAll("p")]) {
+      if (el.querySelector("img,video")) continue;
+      if (!compact(el.textContent)) el.remove();
+    }
   }
   async function fillArticle(task, editor, platform) {
     const doc = new DOMParser().parseFromString(
@@ -422,14 +536,35 @@
       if (
         compact(tmp.textContent) &&
         !(platform === "xiaohongshu" && task.prepared.media.length)
-      )
-        await richPaste(editor, sections[i], i > 0);
+      ) {
+        if (platform === "x") {
+          await richPaste(
+            editor,
+            "<p>\u200b</p>",
+            i > 0 || Boolean(compact(plainText(editor))),
+          );
+          await richPaste(editor, sections[i], true);
+        } else await richPaste(editor, sections[i], i > 0);
+      }
       expected += tmp.textContent;
       if (i < task.prepared.media.length) {
         prefixes.push(compact(expected));
         if (platform !== "xiaohongshu")
           await insertImage(task, editor, platform, i);
       }
+    }
+    if (platform === "x") stripSpacers(editor);
+    if (platform === "x" && compact(plainText(editor)) !== compact(expected)) {
+      for (const section of sections) {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = section;
+        const text = compact(tmp.textContent);
+        if (!text || compact(plainText(editor)).includes(text)) continue;
+        await richPaste(editor, "<p>\u200b</p>", true);
+        await richPaste(editor, section, true);
+        task._repaired = true;
+      }
+      stripSpacers(editor);
     }
     if (compact(plainText(editor)) !== compact(expected))
       attention("正文完整性校验未通过，请检查保留的草稿");
@@ -570,7 +705,10 @@
     );
     if (!/\/compose\/articles\/edit\/\d+/.test(location.pathname))
       attention("X 未返回独立的草稿地址，请打开编辑器检查");
-    return result(task, "X 显示 Last saved，且已返回独立文章草稿地址");
+    const saved = result(task, "X 显示 Last saved，且已返回独立文章草稿地址");
+    if (task._repaired)
+      saved.warnings = ["有段落是核对后补回的，补回的段落可能没有加粗和链接"];
+    return saved;
   }
   function wechatBody() {
     const selector =
@@ -725,15 +863,12 @@
     const names = Array.isArray(texts) ? texts : [texts];
     const hit = exact(names, root);
     if (hit) return hit;
-    const els = queryAll(
-      "button,[role=button],a,label,span,div",
-      root,
-    ).filter(visible);
+    const els = queryAll("button,[role=button],a,label,span,div", root).filter(
+      visible,
+    );
     for (const name of names) {
       const match = els
-        .filter(
-          (el) => norm(el.textContent).replace(/^\+\s*/, "") === name,
-        )
+        .filter((el) => norm(el.textContent).replace(/^\+\s*/, "") === name)
         .sort(
           (a, b) =>
             a.querySelectorAll("*").length - b.querySelectorAll("*").length,
@@ -756,7 +891,9 @@
           a.querySelectorAll("*").length - b.querySelectorAll("*").length,
       )[0];
   }
-  async function uploadCoverDialog(task, asset) {
+  async function uploadCoverDialog(task, asset, ratios = [], keepOpen = false) {
+    const directEdit = exact(["直接编辑"]);
+    if (directEdit) click(directEdit);
     const dialog = await wait(
       () => coverDialog(),
       "封面编辑窗口没有打开",
@@ -778,6 +915,27 @@
     }
     await upload(input, await file(task, asset));
     await sleep(400);
+    const openDialog = () => coverDialog() || dialog;
+    if (ratios.length) {
+      const ratio = exact(ratios, openDialog()) || exact(ratios);
+      if (!ratio)
+        note(task, "未找到封面比例「" + ratios[0] + "」，请在平台确认裁切");
+      else {
+        click(ratio);
+        await sleep(200);
+        const on =
+          ratio.getAttribute("aria-pressed") === "true" ||
+          ratio.getAttribute("aria-selected") === "true" ||
+          ratio.classList.contains("active") ||
+          /\b(active|selected|checked)\b/.test(ratio.className || "");
+        if (!on)
+          note(
+            task,
+            "已点封面比例「" + ratios[0] + "」，页面没有显示选中，请核对裁切",
+          );
+      }
+    }
+    if (keepOpen) return;
     const done = controlByText(
       ["完成", "确认", "确定"],
       coverDialog() || dialog,
@@ -790,7 +948,7 @@
       8000,
     );
   }
-  async function uploadChosenCover(task, openers) {
+  async function uploadChosenCover(task, openers, ratios = []) {
     const asset = coverFile(task, [
       "cover-portrait",
       "cover",
@@ -801,7 +959,7 @@
     const opener = controlByText(openers);
     if (!opener) attention("未找到封面入口，请在页面上打开封面编辑");
     click(opener);
-    await uploadCoverDialog(task, asset);
+    await uploadCoverDialog(task, asset, ratios);
     return true;
   }
   function coverEdit(label) {
@@ -816,12 +974,12 @@
     if (!seed) return null;
     let node = seed;
     for (let i = 0; i < 8 && node; i++) {
-      const edit = [...node.querySelectorAll("button,div,span,[role=button]")].find(
-        (el) => {
-          const text = norm(el.textContent);
-          return text === "编辑" || text === "编辑封面";
-        },
-      );
+      const edit = [
+        ...node.querySelectorAll("button,div,span,[role=button]"),
+      ].find((el) => {
+        const text = norm(el.textContent);
+        return text === "编辑" || text === "编辑封面";
+      });
       if (edit) return edit.closest("button,[role=button]") || edit;
       node = node.parentElement;
     }
@@ -844,6 +1002,189 @@
       count++;
     }
     return count;
+  }
+  async function uploadDouyinCovers(task) {
+    const slots = [
+      [["cover-landscape"], "设置横封面", ["4:3", "4：3"]],
+      [["cover-portrait", "cover"], "设置竖封面", ["3:4", "3：4"]],
+    ].filter(([roles]) => coverFile(task, roles));
+    if (!slots.length) return false;
+    await status(task, "filling", "上传封面");
+    const opener = controlByText(["选择封面", "编辑封面", "设置封面"]);
+    if (!opener) attention("未找到封面入口，请在页面上打开封面编辑");
+    click(opener);
+    const dialog = await wait(
+      () => coverDialog(),
+      "封面编辑窗口没有打开",
+      8000,
+    );
+    const tabbed = slots.some(
+      ([_, label]) => exact(label, dialog) || exact(label),
+    );
+    if (!tabbed) {
+      await uploadCoverDialog(
+        task,
+        coverFile(task, slots[0][0]),
+        slots.length === 1 ? slots[0][2] : [],
+      );
+      if (slots.length > 1)
+        note(task, "未找到抖音横竖封面页签，只上传了一张封面");
+      return true;
+    }
+    for (let index = 0; index < slots.length; index++) {
+      const [roles, label, ratios] = slots[index];
+      const tab = exact(label, coverDialog() || dialog) || exact(label);
+      if (tab) click(tab);
+      await uploadCoverDialog(
+        task,
+        coverFile(task, roles),
+        ratios,
+        index < slots.length - 1,
+      );
+    }
+    return true;
+  }
+  async function bilibiliVideo(task) {
+    auth();
+    await status(task, "uploading", "上传视频素材");
+    const asset = task.assets.find((item) => item.role === "video");
+    const input = await wait(
+      () => field(".bcc-upload-wrapper input[type=file]") || inputFor("video"),
+      "未找到 B 站视频上传控件",
+    );
+    await upload(input, await file(task, asset));
+    const title = await wait(
+      () => field('input[placeholder*="稿件标题"]'),
+      "等待 B 站编辑表单超时",
+      300000,
+    );
+    textField(title, task.title);
+    const desc = field(".ql-editor");
+    if (desc) textField(desc, task.description || "");
+    for (const close of queryAll(
+      ".tag-pre-wrp svg.close, .label-item-v2-container .close",
+    ))
+      if (visible(close)) click(close);
+    const tags = tagList(task);
+    const tagInput = field(
+      'input[placeholder*="创建标签"],input[placeholder*="标签"]',
+    );
+    if (tagInput) {
+      for (const tag of tags.slice(0, 10)) {
+        textField(tagInput, tag);
+        pressEnter(tagInput);
+        await sleep(100);
+        const chip = queryAll(
+          ".label-item-v2-container, .tag-pre-wrp span",
+        ).some((el) => norm(el.textContent) === tag);
+        if (!chip)
+          note(
+            task,
+            "标签「" + tag + "」没有出现在 B 站标签区，平台可能拒绝了它",
+          );
+      }
+    } else if (tags.length) note(task, "未找到 B 站标签输入框");
+    const covered = await uploadChosenCover(task, [
+      "更换封面",
+      "上传封面",
+      "封面",
+    ]);
+    attention(
+      withNotes(
+        task,
+        covered
+          ? "视频、标题、简介和封面已填入 B 站。请补创作声明和分区后自行投稿"
+          : "视频和文案已填入 B 站。请补封面、创作声明和分区后自行投稿",
+      ),
+    );
+  }
+  async function youtubeVideo(task) {
+    auth();
+    await status(task, "uploading", "上传视频素材");
+    const asset = task.assets.find((item) => item.role === "video");
+    const input = await wait(
+      () => field('input[name="Filedata"]') || inputFor("video"),
+      "未找到 YouTube 视频上传控件",
+    );
+    await upload(input, await file(task, asset));
+    const boxes = () =>
+      queryAll('#textbox[contenteditable="true"],[contenteditable="true"]');
+    const title = await wait(() => boxes()[0], "未找到 YouTube 标题", 300000);
+    textField(title, task.title);
+    const desc = boxes()[1];
+    if (desc) textField(desc, task.description || "");
+    if (compact(plainText(title)) !== compact(task.title))
+      attention("YouTube 没有接收标题");
+    const thumb = coverFile(task, [
+      "cover-landscape",
+      "cover",
+      "cover-portrait",
+    ]);
+    if (thumb) {
+      const imageInput = inputFor("image");
+      if (imageInput) await upload(imageInput, await file(task, thumb));
+      else note(task, "未找到缩略图上传框，请使用 16:9、2MB 以内的图片");
+    }
+    const tagInput = field(
+      'input[aria-label="标签"],input[aria-label="Tags"],input[aria-label*="tag"]',
+    );
+    if (tagInput) {
+      for (const tag of tagList(task)) {
+        textField(tagInput, tag);
+        pressEnter(tagInput);
+      }
+    }
+    attention(
+      withNotes(
+        task,
+        "视频已交给 YouTube，页面会把它存成私享视频。请核对标题、说明、缩略图，并自行选择是否面向儿童和公开范围。插件不会点发布",
+      ),
+    );
+  }
+  async function instagramVideo(task) {
+    auth();
+    await status(task, "uploading", "上传视频素材");
+    const asset = task.assets.find((item) => item.role === "video");
+    let input = inputFor("video");
+    if (!input) {
+      const entry = exact(["新帖子", "帖子"]);
+      if (entry) click(entry);
+      input = await wait(
+        () => inputFor("video"),
+        "未找到 Instagram 视频选择框。请先打开首页的新帖子",
+        8000,
+      );
+    }
+    await upload(input, await file(task, asset));
+    const original = exact(["原版", "Original"]);
+    if (original) click(original);
+    else note(task, "未找到「原版」裁剪，默认比例可能会把横屏裁成方形");
+    const caption = await wait(
+      () =>
+        field('[role="dialog"] [contenteditable="true"]') ||
+        field("[contenteditable=true]"),
+      "未找到 Instagram 配文框",
+    );
+    textField(caption, task.description || task.title);
+    const cover = coverFile(task, [
+      "cover-landscape",
+      "cover",
+      "cover-portrait",
+    ]);
+    if (cover) {
+      const imageInput = queryAll("input[type=file]").find((el) =>
+        /jpeg|png|image/i.test(el.getAttribute("accept") || ""),
+      );
+      if (imageInput && imageInput !== input)
+        await upload(imageInput, await file(task, cover));
+      else note(task, "未找到封面上传框，请在封面照片里自行选择");
+    }
+    attention(
+      withNotes(
+        task,
+        "视频和配文已填入 Instagram。请确认裁剪、封面和配文后自行分享。插件不会点分享，也不会修改页面脚本",
+      ),
+    );
   }
   async function video(task) {
     auth();
@@ -911,17 +1252,18 @@
         "未找到视频简介框",
       );
       textField(desc, task.description || "");
+      await confirmTopics(task, desc);
       await sleep(1000);
       if (
         title.value !== task.title ||
         compact(plainText(desc)) !== compact(task.description || "")
       )
         attention("平台仍在初始化视频文案，请检查保留的页面");
-      const covered = await uploadChosenCover(task, [
-        "编辑封面",
-        "设置封面",
-        "修改封面",
-      ]);
+      const covered = await uploadChosenCover(
+        task,
+        ["编辑封面", "设置封面", "修改封面"],
+        ["3:4", "3：4"],
+      );
       if (task.fillOnly)
         attention(
           covered
@@ -929,7 +1271,9 @@
             : "视频与文案已填入；请检查封面和 AI 声明后自行保存或发布",
         );
       const saved = await saveXhs(task);
-      if (task.aiGenerated) saved.warnings = ["发布前请在平台确认 AI 内容声明"];
+      const warnings = [...(task._notes || [])];
+      if (task.aiGenerated) warnings.unshift("发布前请在平台确认 AI 内容声明");
+      if (warnings.length) saved.warnings = warnings;
       return saved;
     }
     if (task.platform === "channels") {
@@ -958,15 +1302,33 @@
         "等待视频号编辑表单超时",
         300000,
       );
-      textField(desc, task.description || task.title);
+      textField(desc, withTopicSpaces(task.description || task.title));
+      for (const name of hashTopics(task.description || "")) {
+        const marked = queryAll("[class*=topic],a", desc).some(
+          (el) => norm(el.textContent).replace(/^#/, "") === name,
+        );
+        if (!marked)
+          note(
+            task,
+            "话题「" +
+              name +
+              "」已按「#" +
+              name +
+              " 」写入，请确认视频号已高亮",
+          );
+      }
       const title = editable().find((el) => /短标题|概括视频/.test(hintOf(el)));
       if (title) textField(title, task.title);
+      await waitUploadIdle();
       const covered = await uploadChannelCovers(task);
       if (task.fillOnly)
         attention(
-          covered
-            ? "视频、文案和封面已填入；请检查上传进度和 AI 声明后自行保存或发布"
-            : "视频与文案已填入；请检查上传进度、短标题和 AI 声明后自行保存或发布",
+          withNotes(
+            task,
+            covered
+              ? "视频、文案和封面已填入；请检查上传进度和 AI 声明后自行保存或发布"
+              : "视频与文案已填入；请检查上传进度、短标题和 AI 声明后自行保存或发布",
+          ),
         );
       const save = exact(["保存草稿", "暂存离开"]);
       if (!save)
@@ -1001,15 +1363,17 @@
           title,
           [task.title, task.description].filter(Boolean).join("\n"),
         );
-      const covered = await uploadChosenCover(task, [
-        "选择封面",
-        "编辑封面",
-        "设置封面",
-      ]);
+      const topicsHost = desc && desc !== title ? desc : title;
+      if (topicsHost) await confirmTopics(task, topicsHost);
+      await waitUploadIdle();
+      const covered = await uploadDouyinCovers(task);
       attention(
-        covered
-          ? "视频、文案和封面已填入抖音；请检查话题后自行发布"
-          : "视频与文案已填入抖音；请检查封面和话题后自行发布",
+        withNotes(
+          task,
+          covered
+            ? "视频、文案和封面已填入抖音；请核对后自行发布"
+            : "视频与文案已填入抖音；请检查封面后自行发布",
+        ),
       );
     }
     const editor = await wait(
@@ -1019,9 +1383,14 @@
     );
     if (norm(editor.textContent))
       attention("X 编辑框已有内容，请在原页面继续编辑");
+    const copy = task.description || task.title;
     const description = document.createElement("p");
-    description.textContent = task.description || task.title;
+    description.textContent = copy;
     await richPaste(editor, description.outerHTML);
+    let weight = 0;
+    for (const ch of copy) weight += ch.charCodeAt(0) > 127 ? 2 : 1;
+    if (weight > 280)
+      note(task, "文案按中文计 2、英文计 1 已超过 280，发出需要 Premium");
     await wait(
       () =>
         document.querySelector("video") &&
@@ -1033,7 +1402,9 @@
     if (compact(editor.textContent) !== compact(task.description || task.title))
       attention("视频文案完整性校验未通过，请检查保留的编辑页面");
     if (task.fillOnly)
-      attention("视频与文案已填入；请检查封面后自行保存或发布");
+      attention(
+        withNotes(task, "视频与文案已填入；请检查封面后自行保存或发布"),
+      );
     const close = document.querySelector('[data-testid="app-bar-close"]');
     if (!close) attention("X 视频已准备，请手动关闭编辑器并选择保存草稿");
     click(close);
@@ -1054,11 +1425,13 @@
       "草稿箱未找到对应视频，请检查平台，避免重复创建",
       20000,
     );
-    return result(
+    const saved = result(
       task,
       "X 草稿箱出现匹配文案与视频缩略图",
       "https://x.com/compose/post/unsent/drafts",
     );
+    if (task._notes?.length) saved.warnings = task._notes;
+    return saved;
   }
   function xVideoDraftRow(task) {
     const rows = [
@@ -1165,6 +1538,9 @@
         if (task.platform === "xiaohongshu") return xhsArticle(task);
         if (task.platform === "x") return xArticle(task);
       }
+      if (task.platform === "bilibili") return bilibiliVideo(task);
+      if (task.platform === "youtube") return youtubeVideo(task);
+      if (task.platform === "instagram") return instagramVideo(task);
       return video(task);
     })()
       .then((result) => reply({ ok: true, result }))

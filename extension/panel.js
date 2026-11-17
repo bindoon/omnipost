@@ -1,4 +1,4 @@
-import { PLATFORMS, titleLimit } from "./shared/model.js";
+import { PLATFORMS, assertPlatformCopy } from "./shared/model.js";
 
 const app = document.querySelector("#app");
 const params = new URLSearchParams(location.search);
@@ -27,14 +27,20 @@ function titleOf(job) {
 function blockReason(job) {
   if (!target?.platform) return "当前页还不能填充";
   const title = titleOf(job);
-  const limit = titleLimit(job.kind, target.platform);
-  if (!String(title).trim() || [...String(title)].length > limit)
-    return (
-      PLATFORMS[target.platform].name +
-      "标题需要1～" +
-      limit +
-      "个字符，请在工作台调整"
+  const description =
+    job.overrides?.[target.platform]?.description ?? job.description ?? "";
+  try {
+    assertPlatformCopy(
+      job.kind,
+      target.platform,
+      title,
+      description,
+      job.overrides?.[target.platform]?.tags || "",
+      "请在工作台调整",
     );
+  } catch (error) {
+    return error.message;
+  }
   const state = job.results?.[target.platform]?.state;
   const assist =
     PLATFORMS[target.platform].automation === "assist" ||

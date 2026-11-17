@@ -152,7 +152,7 @@ async function main() {
   }
   if (!command || command === "help") {
     console.log(
-      "omnipost serve | pair | doctor | draft file.md --platforms wechat,xiaohongshu,x | video file.mp4 --title 标题 | status ID | list | retry ID PLATFORM | open ID PLATFORM\n--stage 仅交接到插件，等待当前页填充。--cover-landscape / --cover-portrait 保存横竖封面。默认只生成草稿。--overrides JSON 可逐平台调整 title/description。--full 输出完整任务。",
+      "omnipost serve | pair | doctor | draft file.md --platforms wechat,xiaohongshu,x | video file.mp4 --title 标题 --platforms xiaohongshu,x,channels,douyin,bilibili,youtube,instagram | status ID | list | retry ID PLATFORM | open ID PLATFORM\n--stage 仅交接到插件，等待当前页填充。--cover-landscape / --cover-portrait 保存横竖封面。默认只生成草稿。--overrides JSON 可逐平台调整 title/description/tags。小红书、抖音、视频号正文不要放链接或微信号。--full 输出完整任务。",
     );
     if (X_REPLY_ENABLED)
       console.log(

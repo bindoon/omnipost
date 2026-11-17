@@ -95,7 +95,7 @@ test("逐平台标题与简介独立，正文与原始素材不被覆盖", () =>
   assert.throws(() => validateTask({ ...t, mode: "publish" }), /只推送草稿/);
   assert.throws(
     () => validateTask({ ...t, overrides: { x: { assets: [] } } }),
-    /只接受标题和简介/,
+    /只接受标题、简介和标签/,
   );
 });
 test("未保存、未拿到编辑入口或缺少保存证据时，不得报告草稿就绪", () => {
@@ -182,4 +182,66 @@ test("CLI 手动交接同时保留横竖封面，默认任务仍自动执行", a
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("视频文案在打开页面前拦住链接、过多话题、过短标题和非法标签", () => {
+  const video = {
+    kind: "video",
+    title: "一条足够长的标题",
+    assets: [
+      { id: "v", name: "a.mp4", role: "video", type: "video/mp4", size: 4 },
+    ],
+  };
+  assert.throws(
+    () =>
+      validateTask({
+        ...video,
+        platforms: ["xiaohongshu"],
+        description: "看 https://a.test",
+      }),
+    /不要放链接/,
+  );
+  assert.throws(
+    () =>
+      validateTask({
+        ...video,
+        platforms: ["douyin"],
+        description: "#一 #二 #三 #四 #五 #六",
+      }),
+    /最多 5 个/,
+  );
+  assert.throws(
+    () => validateTask({ ...video, title: "短", platforms: ["channels"] }),
+    /6～16/,
+  );
+  assert.throws(
+    () =>
+      validateTask({
+        ...video,
+        platforms: ["bilibili"],
+        overrides: {
+          bilibili: {
+            tags: Array.from({ length: 11 }, (_, i) => "标签" + i).join(" "),
+          },
+        },
+      }),
+    /最多 10/,
+  );
+  assert.throws(
+    () =>
+      validateTask({
+        ...video,
+        platforms: ["youtube"],
+        overrides: { youtube: { tags: "a<b" } },
+      }),
+    /不能包含/,
+  );
+  const ok = validateTask({
+    ...video,
+    platforms: ["bilibili", "instagram"],
+    description: "简介",
+    overrides: { bilibili: { tags: "人工智能 代理" } },
+  });
+  assert.equal(ok.overrides.bilibili.tags, "人工智能 代理");
+  assert.equal(ok.platforms.includes("instagram"), true);
 });

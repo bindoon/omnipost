@@ -177,7 +177,7 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
         task: model.validateTask({
           id: "auto-channels",
           kind: "video",
-          title: "短标题",
+          title: "视频的短标题",
           platforms: ["channels"],
           assets: [
             {
@@ -271,6 +271,22 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
   assert.equal(injected.at(-1).target.tabId, 42);
   assert.equal(messages.at(-1).m.task.platform, "wechat");
   assert.equal(messages.at(-1).m.task.fillOnly, true);
+  const before = created.length;
+  const auto = model.validateTask({
+    id: "auto-x-bg",
+    kind: "video",
+    title: "虚与实",
+    platforms: ["x"],
+    assets: [
+      { id: "v3", name: "v.mp4", size: 20, role: "video", type: "video/mp4" },
+    ],
+  });
+  for (let i = 0; i < 10; i++) await new Promise(setImmediate);
+  assert.equal((await send({ type: "START", task: auto })).ok, true);
+  for (let i = 0; i < 30 && created.length === before; i++)
+    await new Promise(setImmediate);
+  assert.equal(created.at(-1).active, false);
+  assert.match(created.at(-1).url, /compose\/post/);
 });
 
 test("公众号入口使用当前会话的新文章地址，旧图文与已有草稿不能作为填充目标", () => {
@@ -285,6 +301,22 @@ test("公众号入口使用当前会话的新文章地址，旧图文与已有�
   assert.ok(Number(params.get("timestamp")) > 0);
   assert.equal(target.pageRole(url).role, "editor");
   assert.equal(target.pageRole(list).role, "site");
+  assert.equal(
+    target.pageRole("https://member.bilibili.com/platform/upload/video/frame")
+      .role,
+    "editor",
+  );
+  assert.equal(
+    target.pageRole("https://studio.youtube.com/channel/UC1/videos/upload")
+      .role,
+    "editor",
+  );
+  assert.equal(target.pageRole("https://www.instagram.com/").role, "editor");
+  assert.equal(
+    target.pageRole("https://www.instagram.com/reels/").role,
+    "site",
+  );
+  assert.equal(target.surfaceFor("https://www.instagram.com/reels/"), "panel");
   const job = model.validateTask({
     id: "wx",
     kind: "article",

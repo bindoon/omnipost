@@ -49,13 +49,125 @@ export const PLATFORMS = {
     caption: "视频 · 在发布页填充",
     automation: "assist",
   },
+  bilibili: {
+    name: "哔哩哔哩",
+    short: "B站",
+    glyph: "哔",
+    color: "#fb7299",
+    kinds: ["video"],
+    url: "https://member.bilibili.com/platform/upload/video/frame",
+    caption: "视频 · 在上传页填充",
+    automation: "assist",
+  },
+  youtube: {
+    name: "YouTube",
+    short: "YouTube",
+    glyph: "Y",
+    color: "#ff0033",
+    kinds: ["video"],
+    url: "https://studio.youtube.com/",
+    caption: "视频 · 上传后成为私享",
+    automation: "assist",
+  },
+  instagram: {
+    name: "Instagram",
+    short: "Instagram",
+    glyph: "I",
+    color: "#c13584",
+    kinds: ["video"],
+    url: "https://www.instagram.com/",
+    caption: "视频 · 在首页弹窗填充",
+    automation: "assist",
+  },
 };
+const TITLE_MAX = {
+  article: { wechat: 64, xiaohongshu: 64, x: 100 },
+  video: {
+    xiaohongshu: 20,
+    channels: 16,
+    x: 100,
+    douyin: 30,
+    bilibili: 80,
+    youtube: 100,
+    instagram: 100,
+  },
+};
+const TITLE_MIN = { video: { channels: 6 } };
+const BODY_MAX = {
+  article: { wechat: 120, xiaohongshu: 1000 },
+  video: {
+    xiaohongshu: 1000,
+    douyin: 1000,
+    channels: 1000,
+    bilibili: 2000,
+    youtube: 5000,
+    instagram: 2200,
+  },
+};
+const BAN_CONTACT = new Set(["xiaohongshu", "douyin", "channels"]);
 export function titleLimit(kind, id) {
-  const table =
-    kind === "video"
-      ? { xiaohongshu: 20, channels: 16, x: 100, douyin: 30 }
-      : { wechat: 64, xiaohongshu: 64, x: 100 };
-  return table[id];
+  return TITLE_MAX[kind]?.[id];
+}
+export function charLength(value) {
+  return [...String(value || "")].length;
+}
+export function topicNames(value) {
+  const names = [];
+  for (const match of String(value || "").matchAll(/#([^\s#]+)/g))
+    if (!names.includes(match[1])) names.push(match[1]);
+  return names;
+}
+export function tagNames(value) {
+  return [
+    ...new Set(
+      String(value || "")
+        .split(/[,，\s]+/)
+        .filter(Boolean),
+    ),
+  ];
+}
+export function hasContact(value) {
+  const text = String(value || "");
+  return (
+    /https?:\/\/|www\./i.test(text) ||
+    /(?:微信|薇信|vx|wx|weixin)\s*[:：]?\s*[A-Za-z][\w-]{5,}/i.test(text)
+  );
+}
+export function assertPlatformCopy(
+  kind,
+  id,
+  title,
+  description = "",
+  tags = "",
+  hint = "请在平台适配中调整",
+) {
+  const name = PLATFORMS[id].name;
+  const max = titleLimit(kind, id);
+  const min = TITLE_MIN[kind]?.[id] || 1;
+  const length = charLength(String(title || "").trim());
+  if (!String(title || "").trim() || length > max || length < min)
+    throw new Error(name + "标题需要" + min + "～" + max + "个字符，" + hint);
+  const bodyMax = BODY_MAX[kind]?.[id];
+  if (bodyMax && charLength(description) > bodyMax)
+    throw new Error(name + "正文不能超过" + bodyMax + "个字符");
+  if (kind === "video" && BAN_CONTACT.has(id) && hasContact(description))
+    throw new Error(name + "正文不要放链接或微信号");
+  const topics = topicNames(description);
+  if (id === "douyin" && topics.length > 5)
+    throw new Error("抖音话题最多 5 个");
+  if (id === "bilibili") {
+    const all = [...new Set([...tagNames(tags), ...topics])];
+    if (all.length > 10) throw new Error("B 站标签最多 10 个");
+    if (all.some((tag) => charLength(tag) > 20))
+      throw new Error("B 站单个标签不能超过 20 个字符");
+  }
+  if (id === "youtube") {
+    const all = tagNames(tags);
+    if (all.some((tag) => /[<>]/.test(tag)))
+      throw new Error("YouTube 标签不能包含 < 或 >");
+    if (charLength(all.join("")) > 500)
+      throw new Error("YouTube 标签总长度不能超过 500");
+  }
 }
 export function platformsFor(kind) {
   return Object.keys(PLATFORMS).filter((id) =>
@@ -70,12 +182,14 @@ export function ensurePlatform(job, platform) {
   if (!config) throw new Error("未知平台：" + platform);
   if (!config.kinds.includes(job.kind))
     throw new Error(config.name + "不支持此内容类型");
-  const title = job.overrides?.[platform]?.title ?? job.title;
-  const limit = titleLimit(job.kind, platform);
-  if (!String(title || "").trim() || [...String(title)].length > limit)
-    throw new Error(
-      config.name + "标题需要1～" + limit + "个字符，请在工作台调整",
-    );
+  assertPlatformCopy(
+    job.kind,
+    platform,
+    job.overrides?.[platform]?.title ?? job.title,
+    job.overrides?.[platform]?.description ?? job.description ?? "",
+    job.overrides?.[platform]?.tags || "",
+    "请在工作台调整",
+  );
   if (!job.platforms.includes(platform)) {
     job.platforms.push(platform);
     job.results ??= {};
@@ -147,25 +261,18 @@ export function validateTask(input) {
     const override = input.overrides[id] || {};
     if (
       Object.keys(override).some(
-        (k) => !["title", "description"].includes(k),
+        (k) => !["title", "description", "tags"].includes(k),
       ) ||
       Object.values(override).some((v) => typeof v !== "string")
     )
-      throw new Error("平台调整只接受标题和简介");
-    const targetTitle = override.title ?? title;
-    const limit = titleLimit(input.kind, id);
-    if (!targetTitle.trim() || [...targetTitle].length > limit)
-      throw new Error(
-        PLATFORMS[id].name +
-          "标题需要1～" +
-          limit +
-          "个字符，请在平台适配中调整",
-      );
-    if (
-      id === "wechat" &&
-      (override.description ?? input.description ?? "").length > 120
-    )
-      throw new Error("公众号摘要不能超过120个字符");
+      throw new Error("平台调整只接受标题、简介和标签");
+    assertPlatformCopy(
+      input.kind,
+      id,
+      override.title ?? title,
+      override.description ?? input.description ?? "",
+      override.tags || "",
+    );
   }
   if (input.mode && input.mode !== "draft")
     throw new Error("当前版本只推送草稿");

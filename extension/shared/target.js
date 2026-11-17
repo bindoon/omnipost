@@ -9,6 +9,9 @@ const EDITORS = {
     /^\/creator-micro\/content\/publish\/?$/,
     /^\/content\/upload\/?$/,
   ],
+  bilibili: [/^\/platform\/upload\/video\/frame\/?$/],
+  youtube: [/\/videos\/upload\/?$/],
+  instagram: [/^\/$/, /^\/create(?:\/|$)/],
 };
 export function platformForUrl(value) {
   try {

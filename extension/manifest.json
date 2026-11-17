@@ -10,7 +10,8 @@
     "scripting",
     "alarms",
     "unlimitedStorage",
-    "sidePanel"
+    "sidePanel",
+    "notifications"
   ],
   "host_permissions": [
     "https://mp.weixin.qq.com/*",
@@ -18,6 +19,9 @@
     "https://x.com/*",
     "https://channels.weixin.qq.com/*",
     "https://creator.douyin.com/*",
+    "https://member.bilibili.com/*",
+    "https://studio.youtube.com/*",
+    "https://www.instagram.com/*",
     "http://127.0.0.1/*"
   ],
   "side_panel": { "default_path": "panel.html" },

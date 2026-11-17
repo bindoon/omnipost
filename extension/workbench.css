@@ -609,7 +609,7 @@ textarea {
 }
 .platform-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
 }
 .platform-card {

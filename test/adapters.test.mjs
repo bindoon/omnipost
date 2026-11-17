@@ -930,7 +930,7 @@ function mountRunner(href) {
     },
   };
 }
-function armCoverDialog(document, opener, confirmText) {
+function armCoverDialog(document, opener, confirmText, extras) {
   const names = [];
   opener.onclick = () => {
     const dialog = document.createElement("div");
@@ -948,6 +948,7 @@ function armCoverDialog(document, opener, confirmText) {
     ok.textContent = confirmText;
     ok.onclick = () => dialog.remove();
     dialog.append(upload, ok);
+    extras?.(dialog);
     document.body.append(dialog);
   };
   return names;
@@ -968,7 +969,10 @@ test("小红书填入视频时打开封面弹窗并上传竖封面", async () =>
   document.querySelector("input[type=file]").onchange = () => {
     setTimeout(() => {
       const preview = document.createElement("div");
-      preview.setAttribute("style", "background-image:url(https://xhscdn.com/spectrum/fixture)");
+      preview.setAttribute(
+        "style",
+        "background-image:url(https://xhscdn.com/spectrum/fixture)",
+      );
       document.body.append(preview);
       host.setAttribute("save-disabled", "false");
     }, 20);
@@ -1077,4 +1081,223 @@ test("抖音填入视频时打开封面弹窗并上传封面", async () => {
   );
   assert.match(response.result.message, /封面已填入/);
   assert.deepEqual(names, ["portrait.png"]);
+});
+
+test("小红书封面窗口里有 3:4 时会选中后再保存", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.xiaohongshu.com/publish/publish",
+  );
+  document.body.innerHTML =
+    '<span>草稿箱(0)</span><input type="file" accept="video/mp4"><input placeholder="填写标题"><div contenteditable="true"></div><button id="edit-cover">编辑封面</button><xhs-publish-btn save-disabled="true"></xhs-publish-btn><button id="save">暂存离开</button>';
+  const host = document.querySelector("xhs-publish-btn");
+  let ratioOn = false;
+  armCoverDialog(
+    document,
+    document.querySelector("#edit-cover"),
+    "完成",
+    (dialog) => {
+      const ratio = document.createElement("button");
+      ratio.textContent = "3:4";
+      ratio.onclick = () => {
+        ratioOn = true;
+        ratio.setAttribute("aria-pressed", "true");
+      };
+      dialog.append(ratio);
+    },
+  );
+  document.querySelector("input[type=file]").onchange = () => {
+    setTimeout(() => {
+      const preview = document.createElement("div");
+      preview.setAttribute(
+        "style",
+        "background-image:url(https://xhscdn.com/spectrum/fixture)",
+      );
+      document.body.append(preview);
+      host.setAttribute("save-disabled", "false");
+    }, 20);
+  };
+  document.querySelector("#save").onclick = () => {
+    document.body.innerHTML =
+      '<span>草稿保存成功</span><div class="draft-item" data-draft-id="ratio"><span class="draft-title-text">视频验收</span></div>';
+  };
+  const response = await run({
+    id: "xhs-ratio",
+    kind: "video",
+    platform: "xiaohongshu",
+    title: "视频验收",
+    description: "完整的视频文案",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "portrait",
+        role: "cover-portrait",
+        name: "portrait.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(response.result.state, "draft_ready", response.result.message);
+  assert.equal(ratioOn, true);
+  assert.equal(response.result.warnings, undefined);
+});
+
+test("抖音点中同名联想后，话题才算填入", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/upload",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><div contenteditable="true" data-placeholder="简介"></div><div class="mention-suggest-item-container"><div class="tag-hash">#气血</div><div class="tag-hash">#其他</div></div>';
+  document.querySelector(".tag-hash").onclick = () => {
+    const mention = document.createElement("span");
+    mention.dataset.mention = "气血";
+    mention.textContent = "#气血";
+    document.querySelector("[contenteditable]").append(mention);
+  };
+  const response = await run({
+    id: "douyin-topic",
+    kind: "video",
+    platform: "douyin",
+    fillOnly: true,
+    title: "手麻都是气血不通吗",
+    description: "对读 #气血",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.doesNotMatch(response.result.message, /没有变成平台话题/);
+  assert.equal(document.querySelector("[data-mention]").textContent, "#气血");
+});
+
+test("B 站填入标题、标签和封面，不点击投稿", async () => {
+  const { document, run } = mountRunner(
+    "https://member.bilibili.com/platform/upload/video/frame",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="请输入稿件标题"><div class="ql-editor" contenteditable="true"></div><div class="tag-pre-wrp"></div><input placeholder="按回车键Enter创建标签"><button id="cover">上传封面</button><button id="publish">立即投稿</button>';
+  const tags = [];
+  const tagInput = document.querySelector('input[placeholder*="创建标签"]');
+  tagInput.addEventListener("confirm-tag", () => {
+    const span = document.createElement("span");
+    span.textContent = tagInput.value;
+    document.querySelector(".tag-pre-wrp").append(span);
+    tags.push(tagInput.value);
+  });
+  let published = 0;
+  document.querySelector("#publish").onclick = () => published++;
+  const names = armCoverDialog(
+    document,
+    document.querySelector("#cover"),
+    "完成",
+  );
+  const response = await run({
+    id: "bili",
+    kind: "video",
+    platform: "bilibili",
+    fillOnly: true,
+    title: "一期视频的标题",
+    description: "简介正文",
+    tags: "人工智能 代理",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "c",
+        role: "cover-landscape",
+        name: "landscape.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /创作声明/);
+  assert.equal(published, 0);
+  assert.deepEqual(tags, ["人工智能", "代理"]);
+  assert.deepEqual(names, ["landscape.png"]);
+});
+
+test("YouTube 交视频后停在私享，不点击发布", async () => {
+  const { document, run } = mountRunner(
+    "https://studio.youtube.com/channel/UC1/videos/upload",
+  );
+  document.body.innerHTML =
+    '<input name="Filedata" type="file" accept="video/mp4"><div id="title-box" contenteditable="true"></div><div id="desc-box" contenteditable="true"></div><input id="thumb" type="file" accept="image/jpeg"><button id="publish">Publish</button>';
+  const thumbs = [];
+  document.querySelector("#thumb").addEventListener("change", (event) => {
+    thumbs.push(event.target.files[0].name);
+  });
+  let published = 0;
+  document.querySelector("#publish").onclick = () => published++;
+  const response = await run({
+    id: "yt",
+    kind: "video",
+    platform: "youtube",
+    fillOnly: true,
+    title: "一期视频的标题",
+    description: "说明",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "c",
+        role: "cover-landscape",
+        name: "wide.jpg",
+        type: "image/jpeg",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /私享/);
+  assert.equal(published, 0);
+  assert.deepEqual(thumbs, ["wide.jpg"]);
+  assert.equal(
+    document.querySelector("#title-box").textContent,
+    "一期视频的标题",
+  );
+});
+
+test("Instagram 选原版并填写配文，不点击分享", async () => {
+  const { document, run } = mountRunner("https://www.instagram.com/");
+  document.body.innerHTML =
+    '<div role="dialog"><input type="file" accept="video/mp4"><button id="original">原版</button><div contenteditable="true"></div><input id="cover" type="file" accept="image/jpeg"><button id="share">分享</button></div>';
+  let original = 0;
+  let shared = 0;
+  document.querySelector("#original").onclick = () => original++;
+  document.querySelector("#share").onclick = () => shared++;
+  const response = await run({
+    id: "ig",
+    kind: "video",
+    platform: "instagram",
+    fillOnly: true,
+    title: "一期视频的标题",
+    description: "配文正文",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /不会点分享/);
+  assert.equal(original, 1);
+  assert.equal(shared, 0);
+  assert.match(
+    document.querySelector("[contenteditable]").textContent,
+    /配文正文/,
+  );
 });

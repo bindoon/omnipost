@@ -90,7 +90,7 @@ async function runPlatform(task, platform, targetTab) {
     });
     const url =
       targetTab?.url || (await platformEditorUrl(platform, task.kind));
-    tab = targetTab || (await chrome.tabs.create({ url, active: true }));
+    tab = targetTab || (await chrome.tabs.create({ url, active: false }));
     if (targetTab) {
       await chrome.tabs.update(tab.id, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
@@ -123,6 +123,21 @@ async function runPlatform(task, platform, targetTab) {
   } finally {
     if (tab) activeTabs.delete(tab.id);
   }
+}
+async function setBadge(text) {
+  if (!chrome.action?.setBadgeText) return;
+  await chrome.action.setBadgeBackgroundColor?.({ color: "#008a69" });
+  await chrome.action.setBadgeText({ text });
+}
+function notify(title, message) {
+  if (!chrome.notifications?.create || !chrome.runtime?.getURL) return;
+  const created = chrome.notifications.create("omnipost-done", {
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("icons/icon128.png"),
+    title,
+    message,
+  });
+  created?.catch?.(() => {});
 }
 async function runTask(
   task,
@@ -160,6 +175,8 @@ async function runTask(
       });
       return;
     }
+    let step = 0;
+    const directTotal = platforms.filter((p) => !isAssist(p)).length;
     for (const p of platforms) {
       const current = await get("jobs", task.id);
       if (
@@ -181,8 +198,12 @@ async function runTask(
           });
         continue;
       }
+      step += 1;
+      await setBadge(step + "/" + directTotal);
       await runPlatform(current, p);
     }
+    await setBadge("");
+    if (step) notify("Omnipost", "填写已结束。请逐个页面检查，再自行发布。");
   } finally {
     processing = false;
     await announce();
