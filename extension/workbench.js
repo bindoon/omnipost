@@ -3,6 +3,7 @@ import {
   validateTask,
   initialResults,
   retryable,
+  canFillCurrent,
   TERMINAL,
   platformsFor,
   isAssist,
@@ -33,7 +34,7 @@ function currentView() {
       ? choices
           .map(
             (j) =>
-              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong><p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${currentTarget.role !== "editor" || ![undefined, "ready", "queued", "failed", ...(p === "wechat" || isAssist(p) ? ["needs_attention"] : [])].includes(j.results[p]?.state) ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
+              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong>${j.published?.[p] ? `<span class="pill success">已发布</span>` : ""}<p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${currentTarget.role !== "editor" || !canFillCurrent(p, j.results[p]?.state, j.kind) ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
                 .filter((a) => a.role.startsWith("cover"))
                 .map(
                   (a) =>
@@ -143,11 +144,73 @@ function coverAsset(job) {
 function articleCopyButtons(id = "current") {
   return `<div class="article-copy"><p>手动粘贴到公众号：正文保留排版，标题单独复制。</p><div class="job-actions"><button class="quiet" data-copy-article="${esc(id)}" data-copy-mode="title">复制标题</button><button class="primary" data-copy-article="${esc(id)}" data-copy-mode="body">复制微信正文</button><button class="quiet" data-copy-article="${esc(id)}" data-copy-mode="no-images">复制微信正文（无图）</button></div><p role="status" aria-live="polite"></p></div>`;
 }
+function formatLikes(value) {
+  if (!Number.isFinite(value)) return "";
+  if (value >= 10000) {
+    const shown =
+      value >= 100000
+        ? Math.round(value / 10000)
+        : Math.round(value / 1000) / 10;
+    return String(shown).replace(/\.0$/, "") + "万赞";
+  }
+  return value + "赞";
+}
+function checkLine(j) {
+  const parts = Object.entries(j.checks || {}).flatMap(([id, check]) => {
+    if (!PLATFORMS[id]) return [];
+    const name = PLATFORMS[id].short;
+    if (check.found)
+      return [
+        name +
+          (formatLikes(check.likes)
+            ? " " + formatLikes(check.likes)
+            : " 已发布"),
+      ];
+    return [name + " " + (check.reason || "未找到")];
+  });
+  if (!parts.length) return "";
+  return `<p class="check-line">${esc(parts.join(" · "))}</p>`;
+}
+function formatDay(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.getMonth() + 1 + "/" + d.getDate();
+}
+function notableMessage(result) {
+  const message = String(result?.message || "");
+  if (
+    !message ||
+    message === "等待推送" ||
+    message === "尚未写入草稿" ||
+    message === "打开发布页后，在侧栏选择这条内容" ||
+    message.startsWith("素材已接收") ||
+    message.startsWith("尚未同步到") ||
+    message.includes("需在发布页填充")
+  )
+    return "";
+  return message;
+}
+const shortLabels = {
+  absent: "未同步",
+  ready: "待填充",
+  queued: "等待",
+  opening: "打开中",
+  uploading: "上传中",
+  filling: "填写中",
+  saving: "保存中",
+  draft_ready: "草稿已存",
+  needs_attention: "待处理",
+  failed: "未完成",
+  review_ready: "待审阅",
+};
 function contentCard(j) {
   const ids = [
     ...j.platforms,
     ...platformsFor(j.kind).filter((id) => !j.platforms.includes(id)),
   ];
+  const publishedIds = Object.keys(j.published || {}).filter(
+    (id) => j.published[id] && PLATFORMS[id],
+  );
   const rows = ids
     .map((p) => {
       const included = j.platforms.includes(p);
@@ -159,6 +222,7 @@ function contentCard(j) {
               ? "打开发布页后，在侧栏选择这条内容"
               : "尚未写入草稿",
           };
+      const published = Boolean(j.published?.[p]);
       const done = r.state === "draft_ready";
       const attention = ["needs_attention", "failed"].includes(r.state);
       const busy = ["opening", "uploading", "filling", "saving"].includes(
@@ -171,20 +235,33 @@ function contentCard(j) {
           : busy
             ? ""
             : `<button class="primary" data-sync="run" data-job="${esc(j.id)}" data-platform="${p}">写入草稿</button>`;
-      return `<div class="sync-row"><div><span class="job-platform">${badge(p)} ${esc(PLATFORMS[p].name)}</span><span class="pill ${done ? "success" : attention ? "warn" : ""}">${labels[r.state] || esc(r.state)}</span><p>${esc(r.message || "")}</p></div>${action}</div>`;
+      const detail = notableMessage(r);
+      const day = published ? formatDay(j.published[p]) : "";
+      const likes = published ? formatLikes(j.checks?.[p]?.likes) : "";
+      const stateText = published
+        ? "已发布" + (likes ? " · " + likes : day ? " " + day : "")
+        : shortLabels[r.state] || r.state;
+      const stateClass = published || done ? "ok" : attention ? "warn" : "";
+      return `<div class="sync-row${published ? " published" : ""}" title="${esc(PLATFORMS[p].name + (r.message ? " · " + r.message : ""))}"><span class="job-platform">${badge(p)}<span>${esc(PLATFORMS[p].short)}</span></span><span class="sync-meta"><span class="sync-state ${stateClass}">${esc(stateText)}</span>${detail ? `<span class="sync-detail">${esc(detail)}</span>` : ""}</span><span class="sync-actions">${action}<button type="button" class="mark-published${published ? " on" : ""}" data-publish="${esc(j.id)}" data-platform="${p}" aria-pressed="${published ? "true" : "false"}" title="${published ? "取消这条发布记录" : "记下你已经在这个平台发布"}">${published ? "已发" : "记下"}</button></span></div>`;
     })
     .join("");
-  const controls = `${j.kind === "article" ? articleCopyButtons(j.id) : `<div class="draft-preview" data-preview-for="${esc(j.id)}"></div>`}<div class="sync-row" style="border-top:0;padding-top:0"><div><p>${j.kind === "article" ? "自动填充失败时，可以复制正文到公众号编辑器。" : "视频打不开时这里显示封面，方便辨认。"}</p></div><button class="quiet" data-history="${esc(j.id)}">查看内容</button></div>${rows}`;
+  const controls =
+    j.kind === "article"
+      ? `${articleCopyButtons(j.id)}<div class="platform-sync">${rows}</div>`
+      : `<div class="video-card-layout"><div class="video-stage" data-preview-for="${esc(j.id)}"></div><div class="platform-sync" aria-label="平台操作">${rows}</div></div>`;
   const body =
     j.kind === "article"
       ? `<div class="article-card-layout"><div class="article-controls">${controls}</div><aside class="article-preview" aria-label="文章预览"><div class="article-preview-label">文章预览 <span>公众号排版</span></div><div class="phone"><div class="phone-bar"><span>‹</span><strong>微信公众号</strong><span>•••</span></div><div class="phone-content" data-article-preview="${esc(j.id)}" tabindex="0" role="region" aria-label="文章正文预览"></div></div><p class="preview-foot">可滚动查看全文 · 最终样式以平台编辑器为准</p></aside></div>`
       : controls;
-  return `<article class="content-card"><div class="card-head"><h2>${esc(j.title)}</h2><button class="quiet danger" data-delete="${esc(j.id)}">删除</button></div><p class="saved">${j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : ""}</p>${body}</article>`;
+  const summary = publishedIds.length
+    ? `<p class="publish-line">已发布 ${publishedIds.map((id) => `<b>${esc(PLATFORMS[id].short)}</b>`).join(" ")}</p>`
+    : "";
+  return `<article class="content-card"><div class="card-head"><div class="card-title"><h2>${esc(j.title)}</h2><p class="saved">${j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : ""}</p>${summary}${checkLine(j)}</div><div class="card-actions"><button class="quiet" data-check="${esc(j.id)}">核对已发</button><button class="quiet" data-history="${esc(j.id)}">查看内容</button><button class="quiet danger" data-delete="${esc(j.id)}">删除</button></div></div>${body}</article>`;
 }
 function libraryMain() {
   const kind = state.libraryKind === "article" ? "article" : "video";
   const list = jobs.filter((j) => j.kind === kind);
-  return `<main class="library ${kind === "article" ? "library-articles" : ""}">${currentView()}<div class="library-head"><div class="segmented" role="tablist" aria-label="内容类型"><button role="tab" data-library="video" aria-selected="${kind === "video"}" class="${kind === "video" ? "active" : ""}">视频</button><button role="tab" data-library="article" aria-selected="${kind === "article"}" class="${kind === "article" ? "active" : ""}">文章</button></div><button class="primary" data-action="compose">导入新内容</button></div>${
+  return `<main class="library ${kind === "article" ? "library-articles" : "library-videos"}">${currentView()}<div class="library-head"><div class="segmented" role="tablist" aria-label="内容类型"><button role="tab" data-library="video" aria-selected="${kind === "video"}" class="${kind === "video" ? "active" : ""}">视频</button><button role="tab" data-library="article" aria-selected="${kind === "article"}" class="${kind === "article" ? "active" : ""}">文章</button></div><button class="primary" data-action="compose">导入新内容</button></div>${
     list.length
       ? list.map(contentCard).join("")
       : `<p class="library-empty">${kind === "video" ? "还没有视频。" : "还没有文章。"}导入一份，或让 AI 交接到这里。每条内容下面是各平台的同步状态。</p>`
@@ -594,15 +671,45 @@ app.addEventListener("click", async (e) => {
       render();
       return;
     }
+    if (b.dataset.check) {
+      const item = jobs.find((j) => j.id === b.dataset.check);
+      if (!item) throw new Error("任务不存在");
+      b.disabled = true;
+      for (const platform of platformsFor(item.kind)) {
+        b.textContent = "正在看" + PLATFORMS[platform].short;
+        try {
+          await send("CHECK_PUBLISHED", { id: item.id, platform });
+        } catch (err) {
+          error = err.message;
+        }
+      }
+      await refresh();
+      return;
+    }
+    if (b.dataset.publish) {
+      await send("MARK_PUBLISHED", {
+        id: b.dataset.publish,
+        platform: b.dataset.platform,
+        published: b.getAttribute("aria-pressed") !== "true",
+      });
+      await refresh();
+      return;
+    }
     if (b.dataset.sync) {
       const id = b.dataset.job;
       const platform = b.dataset.platform;
       if (b.dataset.sync === "goto") {
         const item = jobs.find((j) => j.id === id);
-        await send("OPEN_PLATFORM", {
+        const opened = await send("OPEN_PLATFORM", {
           platform,
           kind: item?.kind || "video",
+          jobId: id,
         });
+        if (opened.tabId && chrome.sidePanel?.open) {
+          try {
+            await chrome.sidePanel.open({ tabId: opened.tabId });
+          } catch {}
+        }
       } else if (b.dataset.sync === "open")
         await send("OPEN", { id, platform });
       else await send("RUN_PLATFORM", { id, platform });

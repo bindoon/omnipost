@@ -1,4 +1,4 @@
-import { PLATFORMS } from "./model.js";
+import { PLATFORMS, canFillCurrent } from "./model.js";
 const EDITORS = {
   channels: [/^\/platform\/post\/create\/?$/],
   xiaohongshu: [/^\/publish\/publish\/?$/],
@@ -54,7 +54,43 @@ export function editorUrl(platform, kind = "video", contextUrl = "") {
     return url.href;
   }
   if (platform === "x" && kind === "video") return "https://x.com/compose/post";
+  if (platform === "youtube") {
+    const channel = youtubeChannel(contextUrl);
+    if (channel)
+      return (
+        "https://studio.youtube.com/channel/" + channel + "/videos/upload?d=ud"
+      );
+    return "https://www.youtube.com/upload";
+  }
   return PLATFORMS[platform].url;
+}
+export function youtubeChannel(value) {
+  try {
+    const url = new URL(value || "");
+    if (url.origin !== "https://studio.youtube.com") return "";
+    return url.pathname.match(/\/channel\/(UC[^/]+)/)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+const WORKS = {
+  xiaohongshu: "https://creator.xiaohongshu.com/new/note-manager",
+  douyin: "https://creator.douyin.com/creator-micro/content/manage",
+  bilibili: "https://member.bilibili.com/platform/upload-manager/video",
+  channels: "https://channels.weixin.qq.com/platform/post/list",
+  x: "https://x.com/home",
+  instagram: "https://www.instagram.com/",
+  wechat:
+    "https://mp.weixin.qq.com/cgi-bin/appmsgpublish?sub=list&begin=0&count=10",
+};
+export function worksUrl(platform, contextUrl = "") {
+  if (platform === "youtube") {
+    const channel = youtubeChannel(contextUrl);
+    return channel
+      ? "https://studio.youtube.com/channel/" + channel + "/videos"
+      : "https://studio.youtube.com/";
+  }
+  return WORKS[platform] || "";
 }
 export function pageRole(value) {
   const platform = platformForUrl(value);
@@ -89,13 +125,7 @@ export function assertTarget(job, tab) {
   )
     throw new Error("当前页不支持此内容类型");
   const state = job.results[platform]?.state;
-  const retryable =
-    state === "ready" ||
-    state === "queued" ||
-    state === "failed" ||
-    (state === "needs_attention" &&
-      (PLATFORMS[platform].automation === "assist" || platform === "wechat"));
-  if (!retryable)
+  if (!canFillCurrent(platform, state, job.kind))
     throw new Error("该平台已有处理记录，请先检查原页面，避免重复上传");
   if (pageRole(tab.url).role !== "editor")
     throw new Error(

@@ -29,6 +29,11 @@ test("目标限定原发布页，拒绝同域其他页、伪造域名与重复�
   ])
     assert.throws(() => target.assertTarget(j, { url }));
   j.results.x.state = "needs_attention";
+  assert.equal(
+    target.assertTarget(j, { url: "https://x.com/compose/post" }),
+    "x",
+  );
+  j.results.x.state = "draft_ready";
   assert.throws(
     () => target.assertTarget(j, { url: "https://x.com/compose/post" }),
     /处理记录/,
@@ -94,6 +99,7 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     storage: { local: { get: async () => ({}), set: async () => {} } },
     tabs: {
       onUpdated: { addListener() {} },
+      onActivated: { addListener() {} },
       get: async (id) => ({
         id,
         url: pageUrl,
@@ -169,6 +175,26 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
   )
     await new Promise(setImmediate);
   assert.equal(jobs.get("staged-video").results.x.state, "ready");
+  const marked = await send({
+    type: "MARK_PUBLISHED",
+    id: "staged-video",
+    platform: "x",
+    published: true,
+  });
+  assert.equal(marked.ok, true);
+  const stamp = jobs.get("staged-video").published.x;
+  assert.match(stamp, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(
+    (
+      await send({
+        type: "MARK_PUBLISHED",
+        id: "staged-video",
+        platform: "wechat",
+        published: true,
+      })
+    ).ok,
+    false,
+  );
   assert.equal(created.length, 0);
   assert.equal(
     (
@@ -204,9 +230,16 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
   assert.equal(created.length, 0);
   await clicked({ id: 42, url: "https://x.com/compose/post" });
   assert.equal(created.length, 0);
-  assert.equal(side[0].tabId, 42);
-  assert.match(side[0].path, /panel\.html\?tabId=42/);
-  assert.equal(side[1].open, 42);
+  assert.equal(side[0].open, 42);
+  assert.equal(side[1].tabId, 42);
+  assert.match(side[1].path, /panel\.html\?tabId=42/);
+  await clicked({
+    id: 43,
+    url: "https://creator.xiaohongshu.com/publish/publish?source=official",
+  });
+  assert.equal(created.length, 0);
+  assert.equal(side[2].open, 43);
+  assert.match(side[3].path, /panel\.html\?tabId=43/);
   assert.equal(
     (await send({ type: "FILL_CURRENT", id: "staged-video", tabId: 42 })).ok,
     true,
@@ -226,10 +259,34 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     i++
   )
     await new Promise(setImmediate);
+  assert.equal(jobs.get("staged-video").results.x.state, "needs_attention");
+  assert.equal(jobs.get("staged-video").published.x, stamp);
+  assert.equal(
+    (
+      await send({
+        type: "MARK_PUBLISHED",
+        id: "staged-video",
+        platform: "x",
+        published: false,
+      })
+    ).ok,
+    true,
+  );
+  assert.equal(jobs.get("staged-video").published.x, undefined);
+  assert.equal(
+    (await send({ type: "FILL_CURRENT", id: "staged-video", tabId: 42 })).ok,
+    true,
+  );
+  for (let i = 0; i < 20 && messages.length < 2; i++)
+    await new Promise(setImmediate);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].m.task.fillOnly, true);
+  for (let i = 0; i < 10; i++) await new Promise(setImmediate);
   pageUrl =
     "https://mp.weixin.qq.com/cgi-bin/appmsg?action=list_card&type=77&token=current-token";
   await clicked({ id: 42, url: pageUrl });
-  assert.equal(side.at(-1).open, 42);
+  assert.equal(side.at(-2).open, 42);
+  assert.match(side.at(-1).path, /panel\.html\?tabId=42/);
   const navigation = await send({
     type: "OPEN_PLATFORM",
     platform: "wechat",
@@ -265,7 +322,7 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     (await send({ type: "FILL_CURRENT", id: article.id, tabId: 42 })).ok,
     true,
   );
-  for (let i = 0; i < 20 && messages.length < 2; i++)
+  for (let i = 0; i < 20 && messages.length < 3; i++)
     await new Promise(setImmediate);
   assert.equal(created.length, createdBeforeWechat);
   assert.equal(injected.at(-1).target.tabId, 42);
@@ -310,6 +367,24 @@ test("公众号入口使用当前会话的新文章地址，旧图文与已有�
     target.pageRole("https://studio.youtube.com/channel/UC1/videos/upload")
       .role,
     "editor",
+  );
+  assert.equal(
+    target.pageRole(
+      "https://studio.youtube.com/channel/UCtGHsC4k5P5rB84C4OpzADQ",
+    ).role,
+    "site",
+  );
+  assert.equal(
+    target.editorUrl(
+      "youtube",
+      "video",
+      "https://studio.youtube.com/channel/UCtGHsC4k5P5rB84C4OpzADQ",
+    ),
+    "https://studio.youtube.com/channel/UCtGHsC4k5P5rB84C4OpzADQ/videos/upload?d=ud",
+  );
+  assert.equal(
+    target.editorUrl("youtube", "video"),
+    "https://www.youtube.com/upload",
   );
   assert.equal(target.pageRole("https://www.instagram.com/").role, "editor");
   assert.equal(

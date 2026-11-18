@@ -40,6 +40,7 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
     },
   ];
   const opened = [];
+  const placed = [];
   const source = (
     await fs.readFile(new URL("../extension/panel.js", import.meta.url), "utf8")
   ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
@@ -78,6 +79,10 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
               opened.push(message.type);
               return { ok: true };
             }
+            if (message.type === "PLACE_COVER") {
+              placed.push(message);
+              return { ok: true };
+            }
             return { ok: true };
           },
         },
@@ -104,6 +109,18 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   guide.click();
   await new Promise(setImmediate);
   assert.deepEqual(opened, ["OPEN_WORKBENCH"]);
+  assert.match(document.body.textContent, /按住封面向左拖/);
+  document.querySelector("[data-cover-id=cover-1]").click();
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  const dialog = document.querySelector("dialog");
+  assert.match(dialog.textContent, /按住封面向左拖到上传区/);
+  assert.equal(placed.length, 0);
+  dialog.querySelector("[data-place]").click();
+  await new Promise(setImmediate);
+  assert.equal(placed[0].id, "v1");
+  assert.equal(placed[0].assetId, "cover-1");
+  assert.equal(placed[0].tabId, 7);
 });
 
 test("公众号侧栏在草稿列表提供新建引导，进入文章编辑器后显示文章填充并允许失败后重试", async () => {
@@ -238,4 +255,140 @@ test("跳到发布页时侧栏跟着当前标签更新，不用关掉再打开",
   await new Promise(setImmediate);
   assert.match(document.body.textContent, /手麻，都是气血不通吗/);
   assert.doesNotMatch(document.body.textContent, /当前页不是支持的发布页/);
+});
+
+test("X 中断后侧栏保留提示并可重试，已保存草稿仍禁止重复填充", async () => {
+  const { document } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const job = {
+    id: "interrupted-x",
+    kind: "video",
+    title: "视频",
+    assets: [],
+    platforms: ["x"],
+    results: {
+      x: {
+        state: "needs_attention",
+        message: "扩展曾中断，请检查现有草稿后再重试",
+      },
+    },
+  };
+  let changed;
+  const sent = [];
+  const source = (
+    await fs.readFile(new URL("../extension/panel.js", import.meta.url), "utf8")
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  vm.runInNewContext(source, {
+    document,
+    location: { search: "?tabId=7" },
+    URLSearchParams,
+    URL,
+    console,
+    ...model,
+    chrome: {
+      runtime: {
+        sendMessage: async (m) => {
+          sent.push(m);
+          if (m.type === "STATE") return { ok: true, jobs: [job] };
+          if (m.type === "TARGET")
+            return {
+              ok: true,
+              target: { id: 7, platform: "x", role: "editor" },
+            };
+          return { ok: true };
+        },
+      },
+      tabs: {
+        onUpdated: { addListener() {} },
+        onActivated: { addListener() {} },
+      },
+      storage: {
+        onChanged: {
+          addListener(fn) {
+            changed = fn;
+          },
+        },
+      },
+    },
+  });
+  await new Promise(setImmediate);
+  assert.match(document.body.textContent, /扩展曾中断/);
+  assert.ok(document.querySelector('[data-fill="interrupted-x"]'));
+  document.querySelector('[data-fill="interrupted-x"]').click();
+  await new Promise(setImmediate);
+  assert.equal(sent.find((m) => m.type === "FILL_CURRENT").tabId, 7);
+  job.results.x = { state: "draft_ready", message: "已保存" };
+  changed({ "publisher.lastUpdate": {} });
+  await new Promise(setImmediate);
+  assert.equal(document.querySelector("[data-fill]"), null);
+});
+
+test("打开发布页后，刚点的视频排在侧栏最上面并标为待提交", async () => {
+  const { document } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const jobs = [
+    {
+      id: "new",
+      kind: "video",
+      title: "较新的一条",
+      createdAt: "2026-11-18T00:00:00.000Z",
+      platforms: ["douyin"],
+      results: { douyin: { state: "ready" } },
+      assets: [],
+    },
+    {
+      id: "picked",
+      kind: "video",
+      title: "经络的名字",
+      createdAt: "2026-11-17T00:00:00.000Z",
+      platforms: ["douyin"],
+      results: { douyin: { state: "ready" } },
+      assets: [],
+    },
+  ];
+  const source = (
+    await fs.readFile(new URL("../extension/panel.js", import.meta.url), "utf8")
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  vm.runInNewContext(source, {
+    document,
+    location: { search: "?tabId=7&focus=picked" },
+    URLSearchParams,
+    URL,
+    console,
+    ...model,
+    chrome: {
+      runtime: {
+        sendMessage: async (message) => {
+          if (message.type === "STATE") return { ok: true, jobs };
+          if (message.type === "TARGET")
+            return {
+              ok: true,
+              target: { id: 7, platform: "douyin", role: "editor" },
+            };
+          return { ok: true };
+        },
+      },
+      tabs: {
+        query: async () => [{ id: 7 }],
+        onUpdated: { addListener() {} },
+        onActivated: { addListener() {} },
+      },
+      storage: { onChanged: { addListener() {} } },
+    },
+  });
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  assert.deepEqual(
+    [...document.querySelectorAll("h2")].map((el) => el.textContent),
+    ["经络的名字", "较新的一条"],
+  );
+  const first = document.querySelector(".card");
+  assert.equal(first.classList.contains("pending"), true);
+  assert.match(first.textContent, /待提交/);
+  assert.doesNotMatch(
+    document.querySelectorAll(".card")[1].textContent,
+    /待提交/,
+  );
 });

@@ -80,7 +80,10 @@ test("保存过令牌后会自动连接，空令牌也能再次连接", async (t
         },
       },
       alarms: { onAlarm: { addListener() {} }, create() {} },
-      tabs: { onUpdated: { addListener() {} } },
+      tabs: {
+        onUpdated: { addListener() {} },
+        onActivated: { addListener() {} },
+      },
       action: { onClicked: { addListener() {} } },
     },
     console,

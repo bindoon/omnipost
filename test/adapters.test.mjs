@@ -928,6 +928,9 @@ function mountRunner(href) {
         listener({ type: "RUN_DRAFT", task }, {}, resolve),
       );
     },
+    send(payload) {
+      return new Promise((resolve) => listener(payload, {}, resolve));
+    },
   };
 }
 function armCoverDialog(document, opener, confirmText, extras) {
@@ -1043,6 +1046,41 @@ test("视频号分别把竖封面和横封面写入两张卡片", async () => {
   );
   assert.match(response.result.message, /封面已填入/);
   assert.deepEqual(covers.flat(), ["portrait.png", "landscape.png"]);
+});
+
+test("已打开的封面窗口写入侧栏封面，不关闭窗口", async () => {
+  const { document, send } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/upload",
+  );
+  const pad = "封".repeat(1600);
+  document.body.innerHTML = `<div role="dialog">${pad}<button>上传封面</button><input type="file" accept="image/png"><button id="done">完成</button></div>`;
+  const names = [];
+  let closed = false;
+  const input = document.querySelector("input[type=file]");
+  input.addEventListener("change", () => names.push(input.files[0].name));
+  document.querySelector("#done").onclick = () => {
+    closed = true;
+    document.querySelector("[role=dialog]").remove();
+  };
+  const response = await send({
+    type: "PLACE_COVER",
+    name: "portrait.png",
+    mime: "image/png",
+    chunks: [Buffer.from("png-bytes").toString("base64")],
+  });
+  assert.equal(response.ok, true, response.error);
+  assert.deepEqual(names, ["portrait.png"]);
+  assert.equal(closed, false);
+  assert.equal(document.querySelector("[role=dialog]").isConnected, true);
+  document.body.innerHTML = "<p>没有封面窗口</p>";
+  const closedPage = await send({
+    type: "PLACE_COVER",
+    name: "portrait.png",
+    mime: "image/png",
+    chunks: [Buffer.from("png-bytes").toString("base64")],
+  });
+  assert.equal(closedPage.ok, false);
+  assert.match(closedPage.error, /封面|上传/);
 });
 
 test("抖音填入视频时打开封面弹窗并上传封面", async () => {
@@ -1225,6 +1263,50 @@ test("B 站填入标题、标签和封面，不点击投稿", async () => {
   assert.deepEqual(names, ["landscape.png"]);
 });
 
+test("YouTube 作品列表先点创建再上传，不点公开发布", async () => {
+  const { document, run } = mountRunner(
+    "https://studio.youtube.com/channel/UC1/videos/upload",
+  );
+  document.body.innerHTML =
+    '<button id="create">创建</button><div id="title-box" contenteditable="true"></div><div id="desc-box" contenteditable="true"></div><button id="publish">Publish</button>';
+  document.querySelector("#create").onclick = () => {
+    const upload = document.createElement("button");
+    upload.id = "upload-video";
+    upload.textContent = "上传视频";
+    upload.onclick = () => {
+      const input = document.createElement("input");
+      input.name = "Filedata";
+      input.type = "file";
+      input.accept = "video/mp4";
+      document.body.append(input);
+    };
+    document.body.append(upload);
+  };
+  let published = 0;
+  document.querySelector("#publish").onclick = () => published++;
+  const response = await run({
+    id: "yt-create",
+    kind: "video",
+    platform: "youtube",
+    fillOnly: true,
+    title: "一期视频的标题",
+    description: "说明",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.equal(published, 0);
+  assert.equal(
+    document.querySelector('input[name="Filedata"]').files[0].name,
+    "video.mp4",
+  );
+});
+
 test("YouTube 交视频后停在私享，不点击发布", async () => {
   const { document, run } = mountRunner(
     "https://studio.youtube.com/channel/UC1/videos/upload",
@@ -1301,3 +1383,71 @@ test("Instagram 选原版并填写配文，不点击分享", async () => {
     /配文正文/,
   );
 });
+
+for (const existing of [
+  '<div contenteditable="true">原有文案</div>',
+  '<video><source src="blob:existing"></video>',
+]) {
+  test(`X 重试在已有${existing.startsWith("<video") ? "视频" : "文案"}时停止，不读取素材或重复上传`, async () => {
+    const { document, window } = parseHTML(
+      `<html><body><input type="file" accept="video/mp4">${existing}</body></html>`,
+    );
+    window.HTMLElement.prototype.getBoundingClientRect = () => ({
+      width: 100,
+      height: 30,
+    });
+    let listener;
+    const messages = [];
+    vm.runInNewContext(source, {
+      document,
+      location: {
+        origin: "https://x.com",
+        pathname: "/compose/post",
+        href: "https://x.com/compose/post",
+      },
+      chrome: {
+        runtime: {
+          onMessage: {
+            addListener(fn) {
+              listener = fn;
+            },
+          },
+          sendMessage: async (m) => {
+            messages.push(m);
+            return { ok: true };
+          },
+        },
+      },
+      getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+      setInterval,
+      clearInterval,
+      setTimeout,
+      clearTimeout,
+      Date,
+      console,
+    });
+    const response = await new Promise((resolve) =>
+      listener(
+        {
+          type: "RUN_DRAFT",
+          task: {
+            id: "retry-x",
+            kind: "video",
+            platform: "x",
+            fillOnly: true,
+            title: "视频",
+            assets: [],
+          },
+        },
+        {},
+        resolve,
+      ),
+    );
+    assert.equal(response.result.state, "needs_attention");
+    assert.match(response.result.message, /页面已有内容/);
+    assert.equal(
+      messages.some((m) => m.type === "ASSET"),
+      false,
+    );
+  });
+}

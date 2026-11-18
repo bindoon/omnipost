@@ -242,6 +242,134 @@ test("视频读不到时列表显示封面，并可以删除这条草稿", async
   assert.match(document.body.textContent, /还没有视频/);
 });
 
+test("视频列表记下已发布的平台，并收起重复的同步说明", async () => {
+  const { document, window } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const jobs = [
+    {
+      id: "v1",
+      kind: "video",
+      title: "虚与实到底是什么",
+      description: "虚，就是气血少",
+      createdAt: "2026-11-18T02:00:00.000Z",
+      platforms: ["xiaohongshu", "channels"],
+      published: { xiaohongshu: "2026-11-18T12:00:00.000Z" },
+      results: {
+        xiaohongshu: {
+          state: "ready",
+          message: "素材已接收，等待在平台页点击插件填充",
+        },
+        channels: {
+          state: "needs_attention",
+          message: "视频与文案已填入；请核对后自行发布",
+        },
+      },
+      assets: [
+        {
+          id: "vid",
+          role: "video",
+          name: "a.mp4",
+          type: "video/mp4",
+          size: 100,
+        },
+      ],
+    },
+  ];
+  const sent = [];
+  const source = (
+    await fs.readFile(
+      new URL("../extension/workbench.js", import.meta.url),
+      "utf8",
+    )
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  vm.runInContext(
+    source,
+    vm.createContext({
+      document,
+      window: { scrollTo() {} },
+      location: { search: "", href: "http://127.0.0.1/workbench.html" },
+      URL,
+      URLSearchParams,
+      crypto,
+      console,
+      ...model,
+      extractTitle: content.extractTitle,
+      imagePaths: content.imagePaths,
+      renderArticle: (md, assets) =>
+        content.renderArticle(md, assets, DOMParser),
+      get: async () => undefined,
+      put: async () => {},
+      localStorage: { getItem: () => null, setItem() {} },
+      setTimeout,
+      clearTimeout,
+      chrome: {
+        runtime: {
+          id: "a".repeat(32),
+          async sendMessage(message) {
+            sent.push(message);
+            if (message.type === "MARK_PUBLISHED") {
+              jobs[0].published = {
+                ...(jobs[0].published || {}),
+                [message.platform]: message.published
+                  ? "2026-11-18T04:00:00.000Z"
+                  : undefined,
+              };
+              if (!message.published)
+                delete jobs[0].published[message.platform];
+            }
+            if (message.type === "STATE")
+              return { ok: true, jobs, bridge: { connected: false } };
+            return { ok: true };
+          },
+        },
+        storage: {
+          local: {
+            async get() {
+              return {};
+            },
+            set() {},
+          },
+          onChanged: { addListener() {} },
+        },
+      },
+    }),
+  );
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  const summary = document.querySelector(".publish-line");
+  assert.equal(summary.textContent, "已发布 小红书");
+  assert.doesNotMatch(document.body.textContent, /素材已接收，等待在平台页/);
+  assert.doesNotMatch(document.body.textContent, /打开发布页后，在侧栏选择/);
+  assert.ok(document.querySelector(".sync-row.published"));
+  assert.match(
+    document.querySelector(".sync-row.published").textContent,
+    /已发布 11\/18/,
+  );
+  assert.match(
+    document.querySelector('[data-platform="channels"]').closest(".sync-row")
+      .textContent,
+    /请核对后自行发布/,
+  );
+  document.querySelector('[data-publish="v1"][data-platform="douyin"]').click();
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  assert.equal(sent.at(-2).type, "MARK_PUBLISHED");
+  assert.equal(sent.at(-2).platform, "douyin");
+  assert.equal(sent.at(-2).published, true);
+  assert.match(document.querySelector(".publish-line").textContent, /抖音/);
+  document
+    .querySelector('[data-publish="v1"][data-platform="xiaohongshu"]')
+    .click();
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  assert.equal(sent.at(-2).published, false);
+  assert.doesNotMatch(
+    document.querySelector(".publish-line").textContent,
+    /小红书/,
+  );
+});
+
 test("公众号填充失败后可从内容列表复制标题和正文，编辑预览同样保留复制按钮", async (t) => {
   const { document, window } = parseHTML(
     '<html><body><div id="app"></div></body></html>',

@@ -8,18 +8,23 @@ import {
   TERMINAL,
   isAssist,
   ensurePlatform,
+  safeUrl,
 } from "./shared/model.js";
+import { matchPublished } from "./shared/published.js";
 import {
   platformForUrl,
   assertTarget,
   surfaceFor,
   editorUrl,
   pageRole,
+  worksUrl,
+  youtubeChannel,
 } from "./shared/target.js";
 import { put, get, all, remove, fileChunk } from "./shared/storage.js";
 let socket,
   keepalive,
   processing = false,
+  checking = false,
   authenticated = false,
   connectTail = Promise.resolve(),
   retryTimer = null,
@@ -68,6 +73,13 @@ async function waitTab(tabId) {
   throw new Error("平台页面加载超时");
 }
 async function platformEditorUrl(platform, kind, tabId) {
+  if (platform === "youtube") {
+    const tabs = tabId
+      ? [await chrome.tabs.get(tabId)]
+      : await chrome.tabs.query({});
+    const context = tabs.find((tab) => platformForUrl(tab.url) === "youtube");
+    return editorUrl(platform, kind, context?.url);
+  }
   if (platform !== "wechat") return editorUrl(platform, kind);
   const tabs = tabId
     ? [await chrome.tabs.get(tabId)]
@@ -435,6 +447,55 @@ async function openDraft(id, platform) {
     await resumePlatform(tab.id, j, platform);
   }
 }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function readWorksMessage(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content/published.js"],
+  });
+  return chrome.tabs.sendMessage(tabId, { type: "READ_WORKS" });
+}
+async function readPlatformWorks(platform) {
+  const tabs = await chrome.tabs.query({});
+  const context = tabs.find((tab) => youtubeChannel(tab.url));
+  const url = worksUrl(platform, context?.url || "");
+  if (!url) throw new Error("这个平台还不能核对已发布列表");
+  const [current] = await chrome.tabs.query({
+    active: true,
+    currentWindow: true,
+  });
+  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    await waitTab(tab.id);
+    await sleep(1200);
+    let page = await readWorksMessage(tab.id);
+    const origin = new URL(url).origin;
+    let sameOrigin = false;
+    try {
+      sameOrigin = Boolean(
+        page?.nextUrl && new URL(page.nextUrl).origin === origin,
+      );
+    } catch {}
+    if (sameOrigin) {
+      await chrome.tabs.update(tab.id, { url: page.nextUrl, active: true });
+      await waitTab(tab.id);
+      await sleep(1200);
+      page = await readWorksMessage(tab.id);
+    }
+    if (!page?.items?.length && !page?.loggedOut) {
+      await chrome.tabs.update(tab.id, { active: true });
+      await sleep(1500);
+      page = await readWorksMessage(tab.id);
+    }
+    return page;
+  } finally {
+    if (current?.id)
+      chrome.tabs.update(current.id, { active: true }).catch(() => {});
+    chrome.tabs.remove(tab.id).catch(() => {});
+  }
+}
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   (async () => {
     if (
@@ -481,6 +542,106 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       return { ok: true, chunk: await fileChunk(a.id, index) };
     }
     if (!uiSender(sender)) throw new Error("请求仅允许来自扩展工作台");
+    if (message.type === "MARK_PUBLISHED") {
+      const j = await get("jobs", message.id);
+      if (!j) throw new Error("任务不存在");
+      const config = PLATFORMS[message.platform];
+      if (!config?.kinds.includes(j.kind))
+        throw new Error("这个平台不能记录这条内容");
+      const published = { ...(j.published || {}) };
+      if (message.published === true)
+        published[message.platform] = new Date().toISOString();
+      else {
+        delete published[message.platform];
+        if (j.checks) delete j.checks[message.platform];
+      }
+      j.published = published;
+      await save(j);
+      return { ok: true };
+    }
+    if (message.type === "CHECK_PUBLISHED") {
+      if (processing) throw new Error("正在填入页面，完成后再核对");
+      if (checking) throw new Error("正在核对另一条内容");
+      const origin = await get("jobs", message.id);
+      if (!origin) throw new Error("任务不存在");
+      const platform = message.platform;
+      if (!PLATFORMS[platform]?.kinds.includes(origin.kind))
+        throw new Error("这个平台不能核对这条内容");
+      checking = true;
+      try {
+        const page = await readPlatformWorks(platform);
+        if (!page?.ok) throw new Error(page?.error || "没有读到作品列表");
+        if (page.loggedOut) {
+          origin.checks = {
+            ...(origin.checks || {}),
+            [platform]: {
+              found: false,
+              reason: "需要先登录",
+              checkedAt: new Date().toISOString(),
+            },
+          };
+          await save(origin);
+          return {
+            ok: true,
+            found: false,
+            reason: "需要先登录" + PLATFORMS[platform].name,
+          };
+        }
+        const entries = (await all("jobs"))
+          .filter((job) => PLATFORMS[platform].kinds.includes(job.kind))
+          .map((job) => ({
+            id: job.id,
+            title: job.overrides?.[platform]?.title ?? job.title,
+          }));
+        const matched = matchPublished(entries, page.items || []);
+        const checkedAt = new Date().toISOString();
+        for (const [id, result] of Object.entries(matched)) {
+          if (!result.found) continue;
+          const job = await get("jobs", id);
+          if (!job) continue;
+          job.published = {
+            ...(job.published || {}),
+            [platform]: job.published?.[platform] || checkedAt,
+          };
+          job.checks = {
+            ...(job.checks || {}),
+            [platform]: {
+              found: true,
+              likes: Number.isFinite(result.likes) ? result.likes : null,
+              href: safeUrl(result.href),
+              title: result.title,
+              checkedAt,
+            },
+          };
+          await save(job);
+        }
+        const mine = matched[origin.id] || {
+          found: false,
+          reason: page.note || "列表里没有同名标题",
+        };
+        if (!mine.found) {
+          origin.checks = {
+            ...(origin.checks || {}),
+            [platform]: {
+              found: false,
+              reason: mine.reason,
+              checkedAt,
+              seen: page.items?.length || 0,
+            },
+          };
+          await save(origin);
+        }
+        return {
+          ok: true,
+          found: Boolean(mine.found),
+          likes: mine.likes ?? null,
+          reason: mine.reason || "",
+          seen: page.items?.length || 0,
+        };
+      } finally {
+        checking = false;
+      }
+    }
     if (message.type === "DELETE_JOB") {
       const j = await get("jobs", message.id);
       if (!j) throw new Error("任务不存在");
@@ -582,12 +743,31 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         message.kind === "article" ? "article" : "video",
         message.tabId,
       );
+      let tabId = message.tabId;
       if (message.tabId) {
         await chrome.tabs.update(message.tabId, { url, active: true });
-        return { ok: true };
+      } else {
+        const tab = await chrome.tabs.create({ url, active: true });
+        tabId = tab.id;
       }
-      await chrome.tabs.create({ url, active: true });
-      return { ok: true };
+      if (message.jobId && chrome.storage.session?.set)
+        await chrome.storage.session.set({
+          ["panelFocus." + tabId]: {
+            jobId: message.jobId,
+            platform: message.platform,
+          },
+        });
+      const path =
+        "panel.html?tabId=" +
+        tabId +
+        (message.jobId ? "&focus=" + encodeURIComponent(message.jobId) : "");
+      chrome.sidePanel
+        .setOptions({ tabId, path, enabled: true })
+        .catch(() => {});
+      try {
+        await chrome.sidePanel.open({ tabId });
+      } catch {}
+      return { ok: true, tabId };
     }
     if (message.type === "OPEN_WORKBENCH") {
       await openWorkbench();
@@ -596,6 +776,54 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (message.type === "TARGET") {
       const tab = await chrome.tabs.get(message.tabId);
       return { ok: true, target: { id: tab.id, ...pageRole(tab.url) } };
+    }
+    if (message.type === "PLACE_COVER" || message.type === "ARM_COVER") {
+      if (processing) throw new Error("正在填入页面，完成后再放入封面");
+      const j = await get("jobs", message.id);
+      const a = j?.assets?.find((item) => item.id === message.assetId);
+      if (
+        !a ||
+        !String(a.role || "").startsWith("cover") ||
+        !/^image\//.test(a.type || "")
+      )
+        throw new Error("这不是可放入的封面");
+      if (a.size > 32 * 1024 ** 2)
+        throw new Error("封面超过 32MB，请下载后拖入");
+      const tab = await chrome.tabs.get(message.tabId);
+      if (!platformForUrl(tab.url)) throw new Error("当前页不是支持的发布页");
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content/runner.js"],
+      });
+      const count = Math.max(1, Math.ceil(a.size / 1024 ** 2));
+      const chunks = [];
+      if (j.bridgeJob) {
+        const { bridgeConfig: c } =
+          await chrome.storage.local.get("bridgeConfig");
+        for (let i = 0; i < count; i++) {
+          const response = await fetch(
+            endpoint(c.url) + `/jobs/${j.id}/assets/${a.id}?chunk=${i}`,
+            { headers: { Authorization: "Bearer " + c.token } },
+          );
+          if (!response.ok) throw new Error("无法读取封面");
+          chunks.push((await response.json()).chunk);
+        }
+      } else {
+        for (let i = 0; i < count; i++) chunks.push(await fileChunk(a.id, i));
+      }
+      let response;
+      try {
+        response = await chrome.tabs.sendMessage(tab.id, {
+          type: message.type,
+          name: a.name,
+          mime: a.type,
+          chunks,
+        });
+      } catch {
+        throw new Error("当前页还不能放入封面，请刷新发布页后再试");
+      }
+      if (!response?.ok) throw new Error(response?.error || "没能放入封面");
+      return { ok: true };
     }
     if (message.type === "UI_ASSET") {
       const j = await get("jobs", message.id);
@@ -684,13 +912,24 @@ async function openWorkbench() {
   }
   await chrome.tabs.create({ url: base });
 }
+function armPanel(tab) {
+  if (!tab?.id || !tab.url || surfaceFor(tab.url) !== "panel") return;
+  chrome.sidePanel
+    .setOptions({
+      tabId: tab.id,
+      path: "panel.html?tabId=" + tab.id,
+      enabled: true,
+    })
+    .catch(() => {});
+}
 function openPanel(tab) {
   const path = "panel.html?tabId=" + tab.id;
-  // open() 必须在这次点击里同步调用。先 await setOptions 会让浏览器丢掉点击，侧栏打不开。
+  // open() 必须是这次点击里的第一个侧栏调用。先 setOptions 会在新版 Chrome 里吃掉点击，侧栏打不开，只能落到工作台。
+  const opened = chrome.sidePanel.open({ tabId: tab.id });
   chrome.sidePanel
     .setOptions({ tabId: tab.id, path, enabled: true })
     .catch(console.error);
-  return chrome.sidePanel.open({ tabId: tab.id }).catch(() =>
+  return opened.catch(() =>
     chrome.tabs.create({
       url: chrome.runtime.getURL("workbench.html") + "?targetTab=" + tab.id,
     }),
@@ -699,13 +938,13 @@ function openPanel(tab) {
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (!tab.url || surfaceFor(tab.url) !== "panel") return;
   if (info.status !== "complete" && !info.url) return;
-  chrome.sidePanel
-    .setOptions({
-      tabId,
-      path: "panel.html?tabId=" + tabId,
-      enabled: true,
-    })
-    .catch(console.error);
+  armPanel({ id: tabId, url: tab.url });
+});
+chrome.tabs.onActivated.addListener((info) => {
+  chrome.tabs
+    .get(info.tabId)
+    .then(armPanel)
+    .catch(() => {});
 });
 chrome.action.onClicked.addListener((tab) => {
   if (surfaceFor(tab?.url) === "panel") return openPanel(tab);
@@ -722,7 +961,8 @@ chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });
     for (const r of Object.values(j.results)) {
       if (!TERMINAL.has(r.state)) {
         r.state = "needs_attention";
-        r.message = "扩展曾中断，请检查现有草稿后再重试";
+        r.message =
+          "扩展曾中断，请先检查原页面；如需重新填充，请打开空白发布页后重试";
         changed = true;
       }
     }

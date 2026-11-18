@@ -877,6 +877,131 @@
     }
     return null;
   }
+  function openCoverHost() {
+    const hosts = queryAll("[role=dialog],div,section")
+      .filter((el) => {
+        if (!visible(el)) return false;
+        const text = norm(el.textContent);
+        return (
+          text.length < 8000 &&
+          /上传封面|上传图片/.test(text) &&
+          /完成|确认|确定/.test(text)
+        );
+      })
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      );
+    return coverDialog() || hosts[0] || null;
+  }
+  function fileFromChunks(message) {
+    const chunks = Array.isArray(message.chunks) ? message.chunks : [];
+    if (!chunks.length || chunks.length > 32) throw new Error("没有封面数据");
+    const parts = chunks.map((chunk) => {
+      const binary = atob(chunk);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    });
+    return new File(parts, message.name || "cover.png", {
+      type: message.mime || "image/png",
+    });
+  }
+  let armedCover = null;
+  function deliverCover(target, image) {
+    const host =
+      target?.closest?.("[role=dialog], ytcp-uploads-dialog, form") ||
+      openCoverHost() ||
+      document;
+    const input =
+      (host && inputFor("image", host)) ||
+      inputFor("image") ||
+      field('input[name="Filedata"]');
+    if (input) upload(input, image);
+    if (typeof DragEvent === "function" && target) {
+      const transfer = new DataTransfer();
+      transfer.items.add(image);
+      target.dispatchEvent(
+        new DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: transfer,
+        }),
+      );
+    }
+  }
+  function showDropHint(on) {
+    let hint = document.querySelector("[data-omnipost-drop]");
+    if (!on) {
+      hint?.remove();
+      return;
+    }
+    if (hint) return;
+    hint = document.createElement("div");
+    hint.setAttribute("data-omnipost-drop", "");
+    hint.textContent = "松开鼠标，封面会放进这里";
+    hint.style.cssText =
+      "position:fixed;left:16px;bottom:16px;z-index:2147483646;padding:8px 12px;border-radius:8px;background:#103d36;color:#dbffb3;font:13px/1.4 sans-serif";
+    document.documentElement.append(hint);
+  }
+  document.addEventListener(
+    "dragover",
+    (event) => {
+      if (!armedCover) return;
+      event.preventDefault();
+    },
+    true,
+  );
+  document.addEventListener(
+    "drop",
+    (event) => {
+      if (!armedCover) return;
+      if (event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const point =
+        document.elementFromPoint(event.clientX, event.clientY) ||
+        document.body;
+      const image = armedCover;
+      armedCover = null;
+      showDropHint(false);
+      deliverCover(point, image);
+    },
+    true,
+  );
+  function armCover(message) {
+    armedCover = fileFromChunks(message);
+    showDropHint(true);
+  }
+  async function placeCover(message) {
+    const image = fileFromChunks(message);
+    const dialog = openCoverHost();
+    let input =
+      (dialog && inputFor("image", dialog)) ||
+      inputFor("image") ||
+      field('input[name="Filedata"]');
+    if (!input) {
+      const button = controlByText(
+        [
+          "上传封面",
+          "上传图片",
+          "上传缩略图",
+          "选择图片",
+          "本地上传",
+          "Upload thumbnail",
+        ],
+        dialog || document,
+      );
+      if (!button) throw new Error("请先在页面上打开封面或上传区域");
+      click(button);
+      input = await wait(
+        () => inputFor("image") || field('input[name="Filedata"]'),
+        "未找到封面文件选择框",
+        4000,
+      );
+    }
+    await upload(input, image);
+  }
   function coverDialog() {
     return queryAll("div,section,[role=dialog]")
       .filter((el) => {
@@ -1098,9 +1223,26 @@
       ),
     );
   }
+  async function ensureYoutubeUpload() {
+    if (field('input[name="Filedata"]') || inputFor("video")) return;
+    const create = exact(["创建", "Create"]);
+    if (create) click(create);
+    const opener = await wait(
+      () => exact(["上传视频", "Upload videos", "Upload video"]),
+      "没有找到「上传视频」。请从「创建」里打开上传窗口后再填入。",
+      8000,
+    );
+    click(opener);
+    await wait(
+      () => field('input[name="Filedata"]') || inputFor("video"),
+      "上传窗口还没有出现文件选择框",
+      8000,
+    );
+  }
   async function youtubeVideo(task) {
     auth();
     await status(task, "uploading", "上传视频素材");
+    await ensureYoutubeUpload();
     const asset = task.assets.find((item) => item.role === "video");
     const input = await wait(
       () => field('input[name="Filedata"]') || inputFor("video"),
@@ -1510,6 +1652,16 @@
     );
   }
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
+    if (message?.type === "ARM_COVER" || message?.type === "PLACE_COVER") {
+      const run =
+        message.type === "ARM_COVER"
+          ? Promise.resolve().then(() => armCover(message))
+          : placeCover(message);
+      run
+        .then(() => reply({ ok: true }))
+        .catch((error) => reply({ ok: false, error: error.message }));
+      return true;
+    }
     if (message?.type !== "RUN_DRAFT") return false;
     const task = message.task;
     if (origins[task.platform] !== location.origin) {

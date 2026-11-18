@@ -321,6 +321,15 @@ export function initialResults(task) {
     ]),
   );
 }
+export function canFillCurrent(platform, state, kind) {
+  return (
+    [undefined, "ready", "queued", "failed"].includes(state) ||
+    (state === "needs_attention" &&
+      (isAssist(platform) ||
+        platform === "wechat" ||
+        (platform === "x" && kind === "video")))
+  );
+}
 export function retryable(result) {
   return ["failed", "needs_attention"].includes(result?.state);
 }

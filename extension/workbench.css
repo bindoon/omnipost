@@ -875,6 +875,24 @@ dialog footer {
 .library {
   max-width: 840px;
 }
+.library-videos {
+  max-width: 1080px;
+}
+.video-card-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 8px 28px;
+  align-items: start;
+  padding: 6px 0 4px;
+}
+.video-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #101418;
+}
 .library-head {
   display: flex;
   justify-content: space-between;
@@ -900,10 +918,140 @@ dialog footer {
   justify-content: space-between;
   gap: 12px;
 }
+.card-title {
+  min-width: 0;
+}
+.card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: none;
+  padding-top: 10px;
+}
+.card-actions .danger {
+  margin-top: 0;
+}
 .content-card h2 {
-  margin: 14px 0 0;
-  font-size: 20px;
+  margin: 10px 0 0;
+  font-size: 18px;
   font-weight: 650;
+}
+.publish-line {
+  margin: 2px 0 0;
+  color: #1f7a52;
+  font-size: 12px;
+  font-weight: 650;
+}
+.publish-line b {
+  font-weight: 650;
+  margin-right: 8px;
+}
+.check-line {
+  margin: 2px 0 0;
+  color: #667085;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.platform-sync {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+}
+.platform-sync .sync-row {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid #f2f4f7;
+  background: transparent;
+}
+.platform-sync .sync-row:last-child {
+  border-bottom: 0;
+}
+.platform-sync .sync-row.published {
+  box-shadow: inset 2px 0 0 #8ed4b4;
+  background: transparent;
+}
+.platform-sync .job-platform {
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 550;
+}
+.platform-sync .job-platform span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.platform-sync .platform-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.platform-sync .sync-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.platform-sync .sync-state {
+  flex: none;
+  font-size: 12px;
+  color: #8b97a6;
+  white-space: nowrap;
+}
+.platform-sync .sync-state.ok {
+  color: #1f7a52;
+  font-weight: 600;
+}
+.platform-sync .sync-state.warn {
+  color: #a87328;
+}
+.platform-sync .sync-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #98a2b0;
+  font-size: 12px;
+}
+.platform-sync .sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.platform-sync .primary,
+.platform-sync .quiet {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.platform-sync .mark-published {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #98a2b0;
+  font-size: 12px;
+}
+.platform-sync .mark-published:hover {
+  background: #f4f6f8;
+  color: #526070;
+}
+.platform-sync .mark-published.on {
+  color: #1f7a52;
+  background: #eef8f3;
 }
 .danger {
   margin-top: 14px;
@@ -949,6 +1097,14 @@ dialog footer {
   .sync-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .platform-sync .sync-row {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr) auto;
+    align-items: center;
+  }
+  .platform-sync .sync-detail {
+    display: none;
   }
   .step-desc {
     display: none;
@@ -1025,23 +1181,24 @@ textarea {
   border-radius: 6px;
   margin-bottom: 16px;
 }
-.draft-preview {
-  margin-top: 12px;
-  max-width: 420px;
-}
-.draft-preview video,
-.draft-preview img {
+.video-stage video,
+.video-stage img {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  max-height: 240px;
+  height: 100%;
   object-fit: contain;
-  background: #0d1117;
-  border-radius: 10px;
+  background: #101418;
 }
-.draft-preview p {
+.video-stage p {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
   margin: 0;
-  color: var(--muted, #667085);
-  font-size: 13px;
-  line-height: 1.5;
+  color: #d5dde4;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .article-copy {
@@ -1117,9 +1274,13 @@ textarea {
   background: #f4f8f5;
 }
 @media (max-width: 850px) {
-  .article-card-layout {
+  .article-card-layout,
+  .video-card-layout {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
+  }
+  .video-stage {
+    max-width: 280px;
   }
   .article-preview .phone {
     max-width: 420px;

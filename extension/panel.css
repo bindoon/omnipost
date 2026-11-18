@@ -82,6 +82,20 @@ h1 {
   padding: 12px;
   margin-top: 10px;
 }
+.card.pending {
+  border-color: #8fc5aa;
+  box-shadow: 0 0 0 3px #008a6914;
+}
+.pending-flag {
+  display: inline-block;
+  margin: 0 0 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eaf7ef;
+  color: #1f7a52;
+  font-size: 12px;
+  font-weight: 650;
+}
 .card h2 {
   margin: 0 0 4px;
   font-size: 15px;
@@ -99,6 +113,10 @@ h1 {
   color: #8b949e;
   font-size: 12px;
 }
+dialog img,
+.thumb img {
+  cursor: grab;
+}
 .thumb img {
   display: block;
   width: 100%;
@@ -107,6 +125,11 @@ h1 {
 }
 .card p {
   margin: 0 0 8px;
+}
+.card p.published {
+  margin: 4px 0 8px;
+  color: #1f7a52;
+  font-weight: 650;
 }
 .row {
   display: grid;
@@ -170,6 +193,18 @@ dialog img {
 dialog menu {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
+  margin: 10px 0 0;
   padding: 0;
+}
+.drag-hint,
+dialog [role="status"] {
+  margin: 8px 0 0;
+  color: #5c6b7c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+dialog [role="status"]:empty {
+  display: none;
 }
