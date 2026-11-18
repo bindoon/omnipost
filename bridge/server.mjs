@@ -151,6 +151,22 @@ export async function startBridge({
     });
     res.end(JSON.stringify(value));
   }
+  function allowExtension(req, res) {
+    const origin = req.headers.origin;
+    if (!origin || !publicOrigin(origin)) return;
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Authorization, Content-Type",
+    );
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, DELETE, OPTIONS",
+    );
+    res.setHeader("Access-Control-Max-Age", "600");
+    res.setHeader("Vary", "Origin");
+  }
   async function body(req) {
     let text = "";
     for await (const chunk of req) {
@@ -171,6 +187,12 @@ export async function startBridge({
       const url = new URL(req.url, "http://127.0.0.1");
       if (!publicOrigin(req.headers.origin))
         return reply(res, 403, { error: "Origin rejected" });
+      allowExtension(req, res);
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/health")
         return reply(res, 200, {
           ok: true,

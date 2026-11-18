@@ -278,6 +278,25 @@ async function ensureConnected() {
     return false;
   }
 }
+let bridgeRetry = null;
+function retryBridge() {
+  bridgeRetry ||= ensureConnected().finally(() => {
+    bridgeRetry = null;
+  });
+  return bridgeRetry;
+}
+async function bridgeAssetChunk(config, jobId, assetId, index) {
+  const url =
+    endpoint(config.url) + `/jobs/${jobId}/assets/${assetId}?chunk=${index}`;
+  const run = () =>
+    fetch(url, { headers: { Authorization: "Bearer " + config.token } });
+  try {
+    return await run();
+  } catch {
+    await retryBridge();
+    return run();
+  }
+}
 async function connect(config) {
   const root = endpoint(config.url);
   if (!/^[a-f0-9]{64}$/.test(config.token))
@@ -837,14 +856,26 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (j.bridgeJob) {
         const { bridgeConfig: c } =
           await chrome.storage.local.get("bridgeConfig");
+        if (!c?.url || !c?.token)
+          throw new Error(
+            "还没有连接令牌。运行一次 omnipost pair，把令牌粘贴到「连接 AI」。之后只要 omnipost serve 在运行就会自动连上。",
+          );
         const chunks = [];
         for (let i = 0; i < Math.max(1, Math.ceil(a.size / 1024 ** 2)); i++) {
-          const r = await fetch(
-            endpoint(c.url) + `/jobs/${j.id}/assets/${a.id}?chunk=${i}`,
-            { headers: { Authorization: "Bearer " + c.token } },
-          );
+          let r;
+          try {
+            r = await bridgeAssetChunk(c, j.id, a.id, i);
+          } catch {
+            throw new Error(
+              "视频已经在插件里。预览要读取交给插件时的源文件，请在项目目录运行 omnipost serve。令牌已保存，不用再配对。",
+            );
+          }
           if (!r.ok)
-            throw new Error("无法读取封面，请确认桥接服务运行且源文件未变化");
+            throw new Error(
+              a.type?.startsWith("video/")
+                ? "读不到这条视频的源文件。请确认 omnipost serve 在运行，且原视频没有被改动或移走。"
+                : "无法读取封面，请确认桥接服务运行且源文件未变化",
+            );
           chunks.push((await r.json()).chunk);
         }
         return { ok: true, chunks };

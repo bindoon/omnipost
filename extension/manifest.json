@@ -24,6 +24,9 @@
     "https://www.instagram.com/*",
     "http://127.0.0.1/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; media-src 'self' blob: data:;"
+  },
   "side_panel": { "default_path": "panel.html" },
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "打开发布工作台" },

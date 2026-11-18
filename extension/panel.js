@@ -73,12 +73,15 @@ function coverLabel(role) {
       ? "竖封面"
       : "封面";
 }
+function replaceLabel() {
+  return target?.platform === "youtube" ? "替换缩略图" : "用这张做封面";
+}
 function coverButtons(job) {
   return job.assets
     .filter((a) => a.role?.startsWith("cover"))
     .map((a) => {
       const label = coverLabel(a.role);
-      return `<div class="cover-item"><div class="thumb cover-thumb" data-thumb-for="${esc(job.id)}" data-thumb-asset="${esc(a.id)}"></div><div class="cover-actions"><button type="button" class="quiet" data-cover-job="${esc(job.id)}" data-cover-id="${esc(a.id)}">查看${label}</button><a class="quiet" data-download-for="${esc(a.id)}" download="${esc(a.name || "cover.png")}" aria-disabled="true">下载${label}</a></div></div>`;
+      return `<div class="cover-item"><div class="thumb cover-thumb" data-thumb-for="${esc(job.id)}" data-thumb-asset="${esc(a.id)}"></div><button type="button" class="go cover-replace" data-replace-job="${esc(job.id)}" data-replace-id="${esc(a.id)}">${replaceLabel()}</button><p class="replace-status" data-status-for="${esc(a.id)}"></p><a class="text-link" data-download-for="${esc(a.id)}" download="${esc(a.name || "cover.png")}" aria-disabled="true">下载${label}</a></div>`;
     })
     .join("");
 }
@@ -101,7 +104,11 @@ function videoCard(job) {
     (job.overrides?.[target.platform]?.description ?? job.description) || "";
   const covers = coverButtons(job);
   const pending = job.id === focusJobId;
-  return `<article class="card${pending ? " pending" : ""}">${pending ? `<p class="pending-flag">待提交</p>` : ""}<h2>${esc(title)}</h2>${publishedLine(job)}${covers ? "" : `<div class="thumb" data-thumb-for="${esc(job.id)}"></div>`}<p>${esc(desc.slice(0, 80))}</p><div class="row"><span>短标题</span><b>${esc(title)}</b></div>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}${covers ? `<div class="covers">${covers}</div><p class="drag-hint">按住封面向左拖。松手后写入光标下的上传框。放不进去就下载横封面或竖封面，再从文件夹拖进上传区。</p>` : ""}</article>`;
+  const coverHint =
+    target?.platform === "youtube"
+      ? "点「替换缩略图」即可换上。左侧还在选择视频时，先点「填入这个页面」。"
+      : "点「用这张做封面」放进当前封面框。";
+  return `<article class="card${pending ? " pending" : ""}">${pending ? `<p class="pending-flag">待提交</p>` : ""}<h2>${esc(title)}</h2>${publishedLine(job)}${covers ? "" : `<div class="thumb" data-thumb-for="${esc(job.id)}"></div>`}<p>${esc(desc.slice(0, 80))}</p><div class="row"><span>短标题</span><b>${esc(title)}</b></div>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}${covers ? `<div class="covers">${covers}</div><p class="drag-hint">${coverHint}</p>` : ""}</article>`;
 }
 function articleCard(job) {
   const reason = blockReason(job);
@@ -194,7 +201,7 @@ async function showCover(jobId, assetId) {
   );
   const url = URL.createObjectURL(blob);
   const dialog = document.createElement("dialog");
-  dialog.innerHTML = `<img src="${url}" alt="封面预览" draggable="true"><p class="drag-hint">按住封面向左拖到上传区。网页只接收文件，松手时会把这张图交给当前页。放不进去再点「写入上传框」。</p><p role="status"></p><menu><button type="button" data-place>写入上传框</button><a href="${url}" download="${esc(asset.name)}">下载</a><button type="button" data-close>关闭</button></menu>`;
+  dialog.innerHTML = `<img src="${url}" alt="封面预览" draggable="true"><p role="status"></p><menu><button type="button" class="go" data-place>${replaceLabel()}</button><a href="${url}" download="${esc(asset.name)}">下载</a><button type="button" data-close>关闭</button></menu>`;
   document.body.append(dialog);
   const status = dialog.querySelector("[role=status]");
   const image = dialog.querySelector("img");
@@ -241,13 +248,21 @@ function startCoverDrag(event, job, asset, chunks) {
   send("ARM_COVER", { id: job.id, assetId: asset.id, tabId }).catch(() => {});
 }
 async function putCover(job, asset, status) {
-  status.textContent = "正在放入左侧封面框…";
+  if (status) {
+    status.classList.remove("ok");
+    status.textContent = "正在替换…";
+  }
   try {
     await send("PLACE_COVER", { id: job.id, assetId: asset.id, tabId });
+    if (!status) return;
+    status.classList.add("ok");
     status.textContent =
-      "已放入当前封面页。请核对裁切后再点完成。横竖封面需要各自打开后再放一次。";
+      target?.platform === "youtube"
+        ? "已替换。请看左侧缩略图是不是这张。"
+        : "已放入当前封面框。请核对裁切后再点完成。";
   } catch (error) {
-    status.textContent = error.message;
+    if (status) status.textContent = error.message;
+    else throw error;
   }
 }
 let loadToken = 0;
@@ -310,6 +325,15 @@ app.addEventListener("click", async (e) => {
         kind: target.platform === "wechat" ? "article" : "video",
         tabId,
       });
+      return;
+    }
+    if (b.dataset.replaceId) {
+      const job = jobs.find((j) => j.id === b.dataset.replaceJob);
+      const asset = job?.assets.find((a) => a.id === b.dataset.replaceId);
+      const status = b.parentElement?.querySelector(
+        `[data-status-for="${b.dataset.replaceId}"]`,
+      );
+      if (job && asset) await putCover(job, asset, status);
       return;
     }
     if (b.dataset.coverId) {

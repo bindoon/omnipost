@@ -116,7 +116,9 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   guide.click();
   await new Promise(setImmediate);
   assert.deepEqual(opened, ["OPEN_WORKBENCH"]);
-  assert.match(document.body.textContent, /按住封面向左拖/);
+  assert.match(document.body.textContent, /用这张做封面/);
+  assert.doesNotMatch(document.body.textContent, /按住封面向左拖/);
+  assert.doesNotMatch(document.body.textContent, /写入上传框/);
   assert.match(document.body.textContent, /下载竖封面/);
   assert.match(document.body.textContent, /下载横封面/);
   const portrait = document.querySelector("[data-download-for=cover-1]");
@@ -126,17 +128,16 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   assert.equal(portrait.getAttribute("aria-disabled"), null);
   assert.equal(landscape.getAttribute("download"), "wide.png");
   assert.equal(landscape.getAttribute("href"), "blob:thumb");
-  document.querySelector("[data-cover-id=cover-1]").click();
+  document.querySelector("[data-replace-id=cover-1]").click();
   await new Promise(setImmediate);
-  await new Promise(setImmediate);
-  const dialog = document.querySelector("dialog");
-  assert.match(dialog.textContent, /按住封面向左拖到上传区/);
-  assert.equal(placed.length, 0);
-  dialog.querySelector("[data-place]").click();
   await new Promise(setImmediate);
   assert.equal(placed[0].id, "v1");
   assert.equal(placed[0].assetId, "cover-1");
   assert.equal(placed[0].tabId, 7);
+  assert.match(
+    document.querySelector("[data-status-for=cover-1]").textContent,
+    /已放入当前封面框/,
+  );
 });
 
 test("公众号侧栏在草稿列表提供新建引导，进入文章编辑器后显示文章填充并允许失败后重试", async () => {

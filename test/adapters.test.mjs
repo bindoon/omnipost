@@ -1407,6 +1407,43 @@ test("B 站填入标题、标签和封面，不点击投稿", async () => {
   assert.deepEqual(names, ["landscape.png"]);
 });
 
+test("YouTube 替换缩略图只写入缩略图文件框，不碰视频选择框", async () => {
+  const { document, send } = mountRunner(
+    "https://studio.youtube.com/channel/UC1/videos/upload",
+  );
+  document.body.innerHTML =
+    '<input name="Filedata" type="file" accept="video/mp4"><button id="pick">上传缩略图</button>';
+  const host = document.createElement("ytcp-thumbnails-compact-editor");
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML =
+    '<input id="file-loader" type="file" accept="image/jpeg">';
+  document.body.append(host);
+  const names = [];
+  let picked = 0;
+  document.querySelector("#pick").onclick = () => picked++;
+  const thumb = shadow.querySelector("input");
+  thumb.addEventListener("change", () => names.push(thumb.files[0].name));
+  const response = await send({
+    type: "PLACE_COVER",
+    name: "wide.jpg",
+    mime: "image/jpeg",
+    chunks: [Buffer.from("jpg").toString("base64")],
+  });
+  assert.equal(response.ok, true, response.error);
+  assert.deepEqual(names, ["wide.jpg"]);
+  assert.equal(document.querySelector('[name="Filedata"]').files?.length || 0, 0);
+  assert.equal(picked, 0);
+  document.body.innerHTML = '<input name="Filedata" type="file" accept="video/mp4">';
+  const early = await send({
+    type: "PLACE_COVER",
+    name: "wide.jpg",
+    mime: "image/jpeg",
+    chunks: [Buffer.from("jpg").toString("base64")],
+  });
+  assert.equal(early.ok, false);
+  assert.match(early.error, /先点「填入这个页面」/);
+});
+
 test("YouTube 作品列表先点创建再上传，不点公开发布", async () => {
   const { document, run } = mountRunner(
     "https://studio.youtube.com/channel/UC1/videos/upload",

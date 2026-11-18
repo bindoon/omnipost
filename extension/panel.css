@@ -178,9 +178,26 @@ dialog img,
 .cover-thumb img {
   max-height: 120px;
 }
-.cover-actions {
-  display: flex;
-  gap: 6px;
+.cover-replace {
+  margin-top: 0;
+}
+.replace-status {
+  margin: 6px 0 0;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.replace-status.ok {
+  color: #1f7a52;
+}
+.replace-status:empty {
+  display: none;
+}
+a.text-link {
+  display: inline-block;
+  margin-top: 4px;
+  color: #5c6b7c;
+  font-size: 12px;
 }
 .cover-actions .quiet,
 .links button {

@@ -359,8 +359,12 @@
     const dt = new DataTransfer();
     dt.items.add(f);
     input.files = dt.files;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(
+      new Event("input", { bubbles: true, composed: true }),
+    );
+    input.dispatchEvent(
+      new Event("change", { bubbles: true, composed: true }),
+    );
   }
   function shadowRootOf(el) {
     if (!el || el.nodeType !== 1) return null;
@@ -389,8 +393,36 @@
         }
       }
     };
+    const own = start?.nodeType === 1 ? shadowRootOf(start) : null;
+    if (own) visit(own);
     visit(start);
     return out;
+  }
+  function acceptsImage(input) {
+    if (!input || input.name === "Filedata") return false;
+    const accept = (
+      input.getAttribute("accept") ||
+      input.accept ||
+      ""
+    ).toLowerCase();
+    if (!accept) return input.id === "file-loader";
+    if (/video|mp4|mov/.test(accept) && !/image|png|jpe?g|webp/.test(accept))
+      return false;
+    return /image|png|jpe?g|webp/.test(accept);
+  }
+  function coverFileInput() {
+    const hosts = queryAll(
+      "ytcp-thumbnails-compact-editor, ytcp-thumbnail-uploader, ytcp-video-thumbnail-editor, ytcp-thumbnail-editor",
+    );
+    for (const host of hosts) {
+      const input = queryAll("input[type=file]", host).find(acceptsImage);
+      if (input) return input;
+    }
+    return (
+      queryAll("input#file-loader").find((el) => el.name !== "Filedata") ||
+      queryAll("input[type=file]").find(acceptsImage) ||
+      null
+    );
   }
   function inputFor(kind, root = document) {
     const pattern = new RegExp(
@@ -1054,10 +1086,7 @@
       target?.closest?.("[role=dialog], ytcp-uploads-dialog, form") ||
       openCoverHost() ||
       document;
-    const input =
-      (host && inputFor("image", host)) ||
-      inputFor("image") ||
-      field('input[name="Filedata"]');
+    const input = (host && inputFor("image", host)) || coverFileInput();
     if (input) upload(input, image);
     if (typeof DragEvent === "function" && target) {
       const transfer = new DataTransfer();
@@ -1114,29 +1143,33 @@
     armedCover = fileFromChunks(message);
     showDropHint(true);
   }
+  function pageHost() {
+    if (location.hostname) return location.hostname;
+    const raw = String(location.origin || location.href || "");
+    return raw.replace(/^[a-z]+:\/\//, "").split(/[/?#]/)[0];
+  }
   async function placeCover(message) {
     const image = fileFromChunks(message);
+    if (pageHost().endsWith("youtube.com")) {
+      const input = coverFileInput();
+      if (!input)
+        throw new Error(
+          "左侧还没有缩略图。先点「填入这个页面」，等标题和缩略图出现后再点「替换缩略图」。",
+        );
+      await upload(input, image);
+      return;
+    }
     const dialog = openCoverHost();
-    let input =
-      (dialog && inputFor("image", dialog)) ||
-      inputFor("image") ||
-      field('input[name="Filedata"]');
+    let input = (dialog && inputFor("image", dialog)) || coverFileInput();
     if (!input) {
       const button = controlByText(
-        [
-          "上传封面",
-          "上传图片",
-          "上传缩略图",
-          "选择图片",
-          "本地上传",
-          "Upload thumbnail",
-        ],
+        ["上传封面", "上传图片", "选择图片", "本地上传"],
         dialog || document,
       );
-      if (!button) throw new Error("请先在页面上打开封面或上传区域");
+      if (!button) throw new Error("请先在页面上打开封面编辑，再点「用这张做封面」");
       click(button);
       input = await wait(
-        () => inputFor("image") || field('input[name="Filedata"]'),
+        () => coverFileInput(),
         "未找到封面文件选择框",
         4000,
       );
@@ -1404,9 +1437,19 @@
       "cover-portrait",
     ]);
     if (thumb) {
-      const imageInput = inputFor("image");
+      const started = Date.now();
+      let imageInput = null;
+      while (Date.now() - started < 15000) {
+        imageInput = coverFileInput();
+        if (imageInput) break;
+        await sleep(350);
+      }
       if (imageInput) await upload(imageInput, await file(task, thumb));
-      else note(task, "未找到缩略图上传框，请使用 16:9、2MB 以内的图片");
+      else
+        note(
+          task,
+          "左侧还没有缩略图位置。视频填入后，在侧栏点「替换缩略图」",
+        );
     }
     const tagInput = field(
       'input[aria-label="标签"],input[aria-label="Tags"],input[aria-label*="tag"]',

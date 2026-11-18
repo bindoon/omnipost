@@ -101,6 +101,22 @@ test("桥接需要令牌并拒绝普通网页来源，健康检查不会暴露�
   const health = await req("/health");
   assert.equal(health.value.connected, false);
   assert.equal("token" in health.value, false);
+  const origin = "chrome-extension://" + "a".repeat(32);
+  const preflight = await fetch(root + "/health", {
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "authorization",
+      "Access-Control-Request-Private-Network": "true",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(
+    preflight.headers.get("access-control-allow-private-network"),
+    "true",
+  );
+  assert.equal(preflight.headers.get("access-control-allow-origin"), origin);
 });
 test("AI 提交→模拟扩展领取与保存回包→AI 得到草稿链接；同一任务重复提交不重复分发", async (t) => {
   const { b, req } = await fixture(t);
