@@ -66,17 +66,19 @@ function coverAsset(job) {
     null
   );
 }
+function coverLabel(role) {
+  return role === "cover-landscape"
+    ? "横封面"
+    : role === "cover-portrait"
+      ? "竖封面"
+      : "封面";
+}
 function coverButtons(job) {
   return job.assets
     .filter((a) => a.role?.startsWith("cover"))
     .map((a) => {
-      const label =
-        a.role === "cover-landscape"
-          ? "横封面"
-          : a.role === "cover-portrait"
-            ? "竖封面"
-            : "封面";
-      return `<button class="quiet" data-cover-job="${esc(job.id)}" data-cover-id="${esc(a.id)}">查看${label}</button>`;
+      const label = coverLabel(a.role);
+      return `<div class="cover-item"><div class="thumb cover-thumb" data-thumb-for="${esc(job.id)}" data-thumb-asset="${esc(a.id)}"></div><div class="cover-actions"><button type="button" class="quiet" data-cover-job="${esc(job.id)}" data-cover-id="${esc(a.id)}">查看${label}</button><a class="quiet" data-download-for="${esc(a.id)}" download="${esc(a.name || "cover.png")}" aria-disabled="true">下载${label}</a></div></div>`;
     })
     .join("");
 }
@@ -99,7 +101,7 @@ function videoCard(job) {
     (job.overrides?.[target.platform]?.description ?? job.description) || "";
   const covers = coverButtons(job);
   const pending = job.id === focusJobId;
-  return `<article class="card${pending ? " pending" : ""}">${pending ? `<p class="pending-flag">待提交</p>` : ""}<h2>${esc(title)}</h2>${publishedLine(job)}<div class="thumb" data-thumb-for="${esc(job.id)}"></div><p>${esc(desc.slice(0, 80))}</p><div class="row"><span>短标题</span><b>${esc(title)}</b></div>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}${covers ? `<div class="covers">${covers}</div><p class="drag-hint">按住封面向左拖。松手后写入光标下的上传框，不必先下载。</p>` : ""}</article>`;
+  return `<article class="card${pending ? " pending" : ""}">${pending ? `<p class="pending-flag">待提交</p>` : ""}<h2>${esc(title)}</h2>${publishedLine(job)}${covers ? "" : `<div class="thumb" data-thumb-for="${esc(job.id)}"></div>`}<p>${esc(desc.slice(0, 80))}</p><div class="row"><span>短标题</span><b>${esc(title)}</b></div>${note ? `<p class="error">${esc(note)}</p>` : ""}${reason ? `<p class="error">${esc(reason)}</p>` : `<button class="go" data-fill="${esc(job.id)}">填入这个页面</button>`}${covers ? `<div class="covers">${covers}</div><p class="drag-hint">按住封面向左拖。松手后写入光标下的上传框。放不进去就下载横封面或竖封面，再从文件夹拖进上传区。</p>` : ""}</article>`;
 }
 function articleCard(job) {
   const reason = blockReason(job);
@@ -139,7 +141,9 @@ async function mountThumbs() {
   const token = ++thumbToken;
   for (const el of document.querySelectorAll("[data-thumb-for]")) {
     const job = jobs.find((j) => j.id === el.dataset.thumbFor);
-    const cover = coverAsset(job);
+    const cover = el.dataset.thumbAsset
+      ? job?.assets?.find((a) => a.id === el.dataset.thumbAsset)
+      : coverAsset(job);
     if (!cover) {
       el.textContent = "这条没有封面";
       continue;
@@ -156,6 +160,13 @@ async function mountThumbs() {
         ),
       );
       thumbUrls.set(cover.id, url);
+      const link = [
+        ...(el.parentElement?.querySelectorAll("[data-download-for]") || []),
+      ].find((node) => node.dataset.downloadFor === cover.id);
+      if (link) {
+        link.href = url;
+        link.removeAttribute("aria-disabled");
+      }
       const img = document.createElement("img");
       img.src = url;
       img.alt = cover.name || "封面";

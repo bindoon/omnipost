@@ -108,21 +108,162 @@
     range.selectNodeContents(el);
     selection.removeAllRanges();
     selection.addRange(range);
-    let inserted = false;
     try {
-      inserted = document.execCommand("insertText", false, value);
+      document.execCommand("insertText", false, value);
     } catch {}
-    if (!inserted || compact(el.textContent) !== compact(value)) {
+    if (compact(plainText(el)) !== compact(value)) {
       el.textContent = value;
+    }
+    el.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertText",
+        data: value,
+      }),
+    );
+  }
+  async function fillEditable(el, value) {
+    if (!el) return;
+    if (el.matches("input,textarea")) {
+      textField(el, value);
+      return;
+    }
+    el.focus();
+    const selection = el.getRootNode().getSelection?.() || getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    try {
+      document.execCommand("insertText", false, value);
+    } catch {}
+    if (acceptedEditor(el, value)) return;
+    await sleep(40);
+    if (acceptedEditor(el, value)) return;
+    if (
+      typeof ClipboardEvent === "function" &&
+      typeof DataTransfer === "function"
+    ) {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", value);
       el.dispatchEvent(
-        new InputEvent("input", {
+        new ClipboardEvent("paste", {
           bubbles: true,
-          composed: true,
-          inputType: "insertText",
-          data: value,
+          cancelable: true,
+          clipboardData: dt,
         }),
       );
+      await sleep(40);
+      if (acceptedEditor(el, value)) return;
     }
+    textField(el, value);
+  }
+  function acceptedEditor(el, value) {
+    if (compact(plainText(el)) !== compact(value)) return false;
+    el.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertText",
+        data: value,
+      }),
+    );
+    return true;
+  }
+  function channelsEditor(label) {
+    const seed = queryAll("label,span,div,p,dt,h2,h3")
+      .filter((el) => visible(el) && norm(el.textContent) === label)
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      )[0];
+    if (!seed) return null;
+    let node = seed.parentElement;
+    for (let i = 0; i < 6 && node; i++) {
+      const editor = [
+        ...node.querySelectorAll(
+          '[contenteditable="true"], textarea, input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"])',
+        ),
+      ].find(
+        (el) =>
+          visible(el) &&
+          !seed.contains(el) &&
+          seed.compareDocumentPosition(el) &
+            (globalThis.Node?.DOCUMENT_POSITION_FOLLOWING || 4),
+      );
+      if (editor) return editor;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function channelsDescription() {
+    return (
+      channelsEditor("视频描述") ||
+      field(
+        '.post-desc-box [contenteditable="true"], .input-editor[contenteditable="true"], textarea[placeholder*="描述"], [contenteditable="true"][data-placeholder*="描述"]',
+      )
+    );
+  }
+  function channelsTitle() {
+    return (
+      channelsEditor("短标题") ||
+      field(
+        '.short-title-wrap input, input[placeholder*="短标题"], input[placeholder*="概括视频"]',
+      )
+    );
+  }
+  async function fillChannelsCopy(task, timeout = 300000) {
+    const desc = await wait(
+      () => channelsDescription(),
+      "未找到视频号视频描述",
+      timeout,
+    );
+    const copy = withTopicSpaces(task.description || task.title);
+    await fillEditable(desc, copy);
+    if (compact(plainText(desc)) !== compact(copy))
+      note(task, "视频描述没有完整写入，请在描述框核对");
+    for (const name of hashTopics(task.description || "")) {
+      const marked = queryAll("[class*=topic],a", desc).some(
+        (el) => norm(el.textContent).replace(/^#/, "") === name,
+      );
+      if (!marked)
+        note(
+          task,
+          "话题「" + name + "」已按「#" + name + " 」写入，请确认视频号已高亮",
+        );
+    }
+    const title = channelsTitle();
+    if (title) textField(title, task.title);
+  }
+  function douyinTitle() {
+    return field(
+      'input[placeholder*="作品标题"],input[placeholder*="填写标题"],input[placeholder*="添加作品标题"],textarea[placeholder*="作品标题"]',
+    );
+  }
+  function douyinDescription(title) {
+    const selectors = [
+      '.zone-container[contenteditable="true"]',
+      '.editor-kit-container[contenteditable="true"]',
+      '[data-placeholder*="简介"],[data-placeholder*="描述"],[data-placeholder*="添加作品"]',
+      'textarea[placeholder*="简介"],textarea[placeholder*="描述"],textarea[placeholder*="添加作品"]',
+    ];
+    for (const selector of selectors) {
+      const el = field(selector);
+      if (el && el !== title) return el;
+    }
+    const zone = field(".zone-container, .editor-comp-publish");
+    const nested = zone?.querySelector(
+      '[contenteditable="true"],[contenteditable=""]',
+    );
+    if (nested && nested !== title && visible(nested)) return nested;
+    if (
+      zone &&
+      zone !== title &&
+      zone.getAttribute("contenteditable") !== "false"
+    )
+      return zone;
+    return null;
   }
   const compact = (text) =>
     String(text || "").replace(/[\s\u200b-\u200d\ufeff]/g, "");
@@ -1330,6 +1471,18 @@
   }
   async function video(task) {
     auth();
+    if (
+      task.platform === "channels" &&
+      /\/platform\/post\/coverEdit\/?$/.test(location.pathname)
+    ) {
+      await fillChannelsCopy(task, 30000);
+      attention(
+        withNotes(
+          task,
+          "描述和短标题已写入修改页；请核对后自行点完成。插件不会点完成",
+        ),
+      );
+    }
     if (task.fillOnly) {
       const uploaded = queryAll("video").some(
         (el) => el.currentSrc || el.src || el.querySelector("source[src]"),
@@ -1419,48 +1572,7 @@
       return saved;
     }
     if (task.platform === "channels") {
-      const hintOf = (el) =>
-        [
-          el.getAttribute?.("placeholder"),
-          el.getAttribute?.("data-placeholder"),
-          el.getAttribute?.("aria-placeholder"),
-          el.getAttribute?.("aria-label"),
-          el.className,
-          el.parentElement?.className,
-        ].join(" ");
-      const editable = () =>
-        queryAll(
-          '[contenteditable], textarea, input, [data-placeholder], [class*="editor"], [class*="desc"]',
-        );
-      const desc = await wait(
-        () =>
-          editable().find((el) => {
-            const hint = hintOf(el);
-            return (
-              /描述|添加描述|input-editor|post-desc/.test(hint) &&
-              !/短标题|位置|地点|链接|合集/.test(hint)
-            );
-          }),
-        "等待视频号编辑表单超时",
-        300000,
-      );
-      textField(desc, withTopicSpaces(task.description || task.title));
-      for (const name of hashTopics(task.description || "")) {
-        const marked = queryAll("[class*=topic],a", desc).some(
-          (el) => norm(el.textContent).replace(/^#/, "") === name,
-        );
-        if (!marked)
-          note(
-            task,
-            "话题「" +
-              name +
-              "」已按「#" +
-              name +
-              " 」写入，请确认视频号已高亮",
-          );
-      }
-      const title = editable().find((el) => /短标题|概括视频/.test(hintOf(el)));
-      if (title) textField(title, task.title);
+      await fillChannelsCopy(task);
       await waitUploadIdle();
       const covered = await uploadChannelCovers(task);
       if (task.fillOnly)
@@ -1485,25 +1597,33 @@
       return result(task, "视频号显示保存草稿成功");
     }
     if (task.platform === "douyin") {
-      const title = await wait(
-        () =>
-          field(
-            'input[placeholder*="作品标题"],input[placeholder*="填写标题"],textarea[placeholder*="作品标题"]',
-          ) || field("[contenteditable=true]"),
-        "等待抖音编辑表单超时",
-        300000,
-      );
-      const desc = field(
-        'textarea[placeholder*="简介"],textarea[placeholder*="描述"],textarea[placeholder*="添加作品"],[data-placeholder*="简介"],[data-placeholder*="描述"]',
-      );
+      const title = await wait(() => {
+        const input = douyinTitle();
+        if (input) return input;
+        const editable = field("[contenteditable=true]");
+        if (editable && !douyinDescription(null)) return editable;
+        return null;
+      }, "等待抖音编辑表单超时", 300000);
+      const copy = task.description || "";
+      const desc = copy
+        ? await wait(
+            () => douyinDescription(title),
+            "未找到抖音作品描述",
+            60000,
+          )
+        : null;
       if (desc && desc !== title) {
         textField(title, task.title);
-        textField(desc, task.description || "");
-      } else if (title.matches("input,textarea")) textField(title, task.title);
-      else
-        textField(
+        await fillEditable(desc, copy);
+        if (compact(plainText(desc)) !== compact(copy))
+          note(task, "作品描述没有完整写入，请在描述框核对");
+      } else if (title.matches("input,textarea")) {
+        textField(title, task.title);
+        if (copy) note(task, "作品描述没有完整写入，请在描述框核对");
+      } else
+        await fillEditable(
           title,
-          [task.title, task.description].filter(Boolean).join("\n"),
+          [task.title, copy].filter(Boolean).join("\n"),
         );
       const topicsHost = desc && desc !== title ? desc : title;
       if (topicsHost) await confirmTopics(task, topicsHost);

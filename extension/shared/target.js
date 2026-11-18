@@ -1,6 +1,9 @@
 import { PLATFORMS, canFillCurrent } from "./model.js";
 const EDITORS = {
-  channels: [/^\/platform\/post\/create\/?$/],
+  channels: [
+    /^\/platform\/post\/create\/?$/,
+    /^\/platform\/post\/coverEdit\/?$/,
+  ],
   xiaohongshu: [/^\/publish\/publish\/?$/],
   x: [/^\/compose\/(post|tweet)\/?$/],
   douyin: [

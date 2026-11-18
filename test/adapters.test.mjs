@@ -1045,7 +1045,98 @@ test("视频号分别把竖封面和横封面写入两张卡片", async () => {
     response.result.message,
   );
   assert.match(response.result.message, /封面已填入/);
+  assert.doesNotMatch(response.result.message, /没有完整写入/);
+  assert.equal(
+    document.querySelector(".post-desc-box [contenteditable]").textContent,
+    "对读素问和逆调论",
+  );
+  assert.equal(
+    document.querySelector('input[placeholder*="概括视频"]').value,
+    "手麻都是气血不通吗",
+  );
+  assert.equal(
+    document.querySelector(".post-desc-box [contenteditable]").isConnected,
+    true,
+  );
   assert.deepEqual(covers.flat(), ["portrait.png", "landscape.png"]);
+});
+
+test("视频号描述写入编辑器内部，短标题原样保留逗号", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><div><span>视频描述</span><div class="post-desc-box"><div class="input-editor" contenteditable="true"><span data-leaf="true"></span></div></div></div><div><span>短标题</span><input placeholder="概括视频主要内容"></div>';
+  document.execCommand = (name, _, value) => {
+    if (name !== "insertText") return false;
+    const leaf = document.querySelector("[data-leaf]");
+    leaf.textContent = value;
+    return false;
+  };
+  const response = await run({
+    id: "channels-desc",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "经络的名字，其实是一个地址",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /文案已填入|描述和短标题/);
+  assert.doesNotMatch(response.result.message, /逗号/);
+  assert.doesNotMatch(response.result.message, /没有完整写入/);
+  assert.equal(
+    document.querySelector("[data-leaf]").textContent,
+    "对读素问和逆调论",
+  );
+  assert.equal(document.querySelector(".input-editor").isConnected, true);
+  assert.equal(
+    document.querySelector('input[placeholder*="概括视频"]').value,
+    "经络的名字，其实是一个地址",
+  );
+});
+
+test("视频号修改页只写描述和短标题，不点完成", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/coverEdit?objectId=export%2Fabc",
+  );
+  document.body.innerHTML =
+    '<div><span>视频描述</span><div class="input-editor" contenteditable="true"></div></div><div><span>短标题</span><input value="经络的名字，其实是一个地址"></div><button id="done">完成</button>';
+  let done = 0;
+  document.querySelector("#done").onclick = () => done++;
+  const response = await run({
+    id: "channels-edit",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "经络的名字，其实是一个地址",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /自行点完成/);
+  assert.equal(done, 0);
+  assert.equal(
+    document.querySelector(".input-editor").textContent,
+    "对读素问和逆调论",
+  );
+  assert.equal(
+    document.querySelector('input[placeholder], input').value,
+    "经络的名字，其实是一个地址",
+  );
 });
 
 test("已打开的封面窗口写入侧栏封面，不关闭窗口", async () => {
@@ -1088,7 +1179,7 @@ test("抖音填入视频时打开封面弹窗并上传封面", async () => {
     "https://creator.douyin.com/creator-micro/content/upload",
   );
   document.body.innerHTML =
-    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><button id="pick-cover">选择封面</button>';
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><div class="zone-container" contenteditable="true"></div><button id="pick-cover">选择封面</button>';
   const names = armCoverDialog(
     document,
     document.querySelector("#pick-cover"),
@@ -1118,6 +1209,15 @@ test("抖音填入视频时打开封面弹窗并上传封面", async () => {
     response.result.message,
   );
   assert.match(response.result.message, /封面已填入/);
+  assert.doesNotMatch(response.result.message, /没有完整写入/);
+  assert.equal(
+    document.querySelector('input[placeholder="填写作品标题"]').value,
+    "手麻都是气血不通吗",
+  );
+  assert.equal(
+    document.querySelector(".zone-container").textContent,
+    "对读素问和逆调论",
+  );
   assert.deepEqual(names, ["portrait.png"]);
 });
 
@@ -1209,7 +1309,51 @@ test("抖音点中同名联想后，话题才算填入", async () => {
     response.result.message,
   );
   assert.doesNotMatch(response.result.message, /没有变成平台话题/);
+  assert.match(
+    document.querySelector("[contenteditable]").textContent,
+    /对读 #气血/,
+  );
   assert.equal(document.querySelector("[data-mention]").textContent, "#气血");
+});
+
+test("抖音发布页把描述写入 zone-container，不拆掉编辑器结构", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/post/video",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><div class="zone-container" contenteditable="true"><div class="ace-line"><span data-string="true"></span></div></div>';
+  document.execCommand = (name, _, value) => {
+    if (name !== "insertText") return false;
+    document.querySelector("[data-string]").textContent = value;
+    return false;
+  };
+  const response = await run({
+    id: "douyin-desc",
+    kind: "video",
+    platform: "douyin",
+    fillOnly: true,
+    title: "手麻都是气血不通吗",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /文案已填入/);
+  assert.doesNotMatch(response.result.message, /没有完整写入/);
+  assert.equal(
+    document.querySelector('input[placeholder="填写作品标题"]').value,
+    "手麻都是气血不通吗",
+  );
+  assert.equal(
+    document.querySelector("[data-string]").textContent,
+    "对读素问和逆调论",
+  );
+  assert.equal(document.querySelector(".ace-line").isConnected, true);
 });
 
 test("B 站填入标题、标签和封面，不点击投稿", async () => {

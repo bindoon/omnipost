@@ -167,9 +167,36 @@ dialog img,
   gap: 8px;
   margin-top: 8px;
 }
-.covers button,
+.cover-item {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.cover-thumb {
+  min-height: 72px;
+  margin: 0 0 6px;
+}
+.cover-thumb img {
+  max-height: 120px;
+}
+.cover-actions {
+  display: flex;
+  gap: 6px;
+}
+.cover-actions .quiet,
 .links button {
   flex: 1;
+}
+a.quiet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 12px;
+  text-decoration: none;
+}
+a.quiet[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.45;
 }
 .page-action {
   margin: 12px 0;

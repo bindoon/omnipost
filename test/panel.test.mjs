@@ -36,6 +36,13 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
           type: "image/png",
           size: 4,
         },
+        {
+          id: "cover-wide",
+          role: "cover-landscape",
+          name: "wide.png",
+          type: "image/png",
+          size: 4,
+        },
       ],
     },
   ];
@@ -110,6 +117,15 @@ test("侧栏用封面辨认草稿，并从顶部打开完整工作台", async ()
   await new Promise(setImmediate);
   assert.deepEqual(opened, ["OPEN_WORKBENCH"]);
   assert.match(document.body.textContent, /按住封面向左拖/);
+  assert.match(document.body.textContent, /下载竖封面/);
+  assert.match(document.body.textContent, /下载横封面/);
+  const portrait = document.querySelector("[data-download-for=cover-1]");
+  const landscape = document.querySelector("[data-download-for=cover-wide]");
+  assert.equal(portrait.getAttribute("download"), "c.png");
+  assert.equal(portrait.getAttribute("href"), "blob:thumb");
+  assert.equal(portrait.getAttribute("aria-disabled"), null);
+  assert.equal(landscape.getAttribute("download"), "wide.png");
+  assert.equal(landscape.getAttribute("href"), "blob:thumb");
   document.querySelector("[data-cover-id=cover-1]").click();
   await new Promise(setImmediate);
   await new Promise(setImmediate);

@@ -52,6 +52,12 @@ test("目标限定原发布页，拒绝同域其他页、伪造域名与重复�
     }),
     "channels",
   );
+  assert.equal(
+    target.assertTarget(channels, {
+      url: "https://channels.weixin.qq.com/platform/post/coverEdit?objectId=export%2Fabc",
+    }),
+    "channels",
+  );
   const douyin = task();
   douyin.platforms = ["douyin"];
   douyin.results = { douyin: { state: "ready" } };
