@@ -8,6 +8,7 @@ import {
   platformsFor,
   isAssist,
   X_REPLY_ENABLED,
+  shownMessage,
 } from "./shared/model.js";
 import { put, get } from "./shared/storage.js";
 import { extractTitle, renderArticle, imagePaths } from "./shared/content.js";
@@ -177,7 +178,7 @@ function formatDay(iso) {
   return d.getMonth() + 1 + "/" + d.getDate();
 }
 function notableMessage(result) {
-  const message = String(result?.message || "");
+  const message = shownMessage(result?.message || "");
   if (
     !message ||
     message === "等待推送" ||
@@ -242,7 +243,7 @@ function contentCard(j) {
         ? "已发布" + (likes ? " · " + likes : day ? " " + day : "")
         : shortLabels[r.state] || r.state;
       const stateClass = published || done ? "ok" : attention ? "warn" : "";
-      return `<div class="sync-row${published ? " published" : ""}" title="${esc(PLATFORMS[p].name + (r.message ? " · " + r.message : ""))}"><span class="job-platform">${badge(p)}<span>${esc(PLATFORMS[p].short)}</span></span><span class="sync-meta"><span class="sync-state ${stateClass}">${esc(stateText)}</span>${detail ? `<span class="sync-detail">${esc(detail)}</span>` : ""}</span><span class="sync-actions">${action}<button type="button" class="mark-published${published ? " on" : ""}" data-publish="${esc(j.id)}" data-platform="${p}" aria-pressed="${published ? "true" : "false"}" title="${published ? "取消这条发布记录" : "记下你已经在这个平台发布"}">${published ? "已发" : "记下"}</button></span></div>`;
+      return `<div class="sync-row${published ? " published" : ""}" title="${esc(PLATFORMS[p].name + (r.message ? " · " + shownMessage(r.message) : ""))}"><span class="job-platform">${badge(p)}<span>${esc(PLATFORMS[p].short)}</span></span><span class="sync-meta"><span class="sync-state ${stateClass}">${esc(stateText)}</span>${detail ? `<span class="sync-detail">${esc(detail)}</span>` : ""}</span><span class="sync-actions">${action}<button type="button" class="mark-published${published ? " on" : ""}" data-publish="${esc(j.id)}" data-platform="${p}" aria-pressed="${published ? "true" : "false"}" title="${published ? "取消这条发布记录" : "记下你已经在这个平台发布"}">${published ? "已发" : "记下"}</button></span></div>`;
     })
     .join("");
   const controls =
@@ -324,7 +325,7 @@ function cards() {
       const r = results[p] || { state: "queued", message: "等待推送" };
       const done = r.state === "draft_ready";
       const attention = ["needs_attention", "failed"].includes(r.state);
-      return `<section class="job-card"><div class="job-top"><span class="job-platform">${badge(p)} ${PLATFORMS[p].name}</span><span class="pill ${done ? "success" : attention ? "warn" : ""}">${labels[r.state] || r.state}</span></div><p class="job-message">${esc(r.message || "等待推送")}${r.evidence ? "<br>" + esc(r.evidence) : ""}${r.warnings?.length ? "<br>" + r.warnings.map(esc).join("<br>") : ""}</p>${j ? `<div class="job-actions">${r.tabId || r.draftUrl || r.editorUrl ? `<button class="quiet" data-open="${p}">${done ? "打开草稿，继续编辑" : "打开平台处理"} ↗</button>` : ""}${retryable(r) ? `<button class="quiet" data-retry="${p}">仅重试此平台</button>` : ""}</div>` : ""}</section>`;
+      return `<section class="job-card"><div class="job-top"><span class="job-platform">${badge(p)} ${PLATFORMS[p].name}</span><span class="pill ${done ? "success" : attention ? "warn" : ""}">${labels[r.state] || r.state}</span></div><p class="job-message">${esc(shownMessage(r.message) || "等待推送")}${r.evidence ? "<br>" + esc(r.evidence) : ""}${r.warnings?.length ? "<br>" + r.warnings.map(esc).join("<br>") : ""}</p>${j ? `<div class="job-actions">${r.tabId || r.draftUrl || r.editorUrl ? `<button class="quiet" data-open="${p}">${done ? "打开草稿，继续编辑" : "打开平台处理"} ↗</button>` : ""}${retryable(r) ? `<button class="quiet" data-retry="${p}">仅重试此平台</button>` : ""}</div>` : ""}</section>`;
     })
     .join("")}</div>`;
 }

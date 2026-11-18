@@ -409,3 +409,60 @@ test("打开发布页后，刚点的视频排在侧栏最上面并标为待提�
     /待提交/,
   );
 });
+
+test("视频号侧栏保留描述已写入，不展示话题高亮核对", async () => {
+  const { document } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const job = {
+    id: "channels-filled",
+    kind: "video",
+    title: "胃经，为什么被称作海",
+    platforms: ["channels"],
+    results: {
+      channels: {
+        state: "needs_attention",
+        message:
+          "描述已写入当前页；请核对后自行保存或发表。插件不会点发表；话题「黄帝内经」已按「#黄帝内经 」写入，请确认视频号已高亮；话题「中医文化」已按「#中医文化 」写入，请确认视频号已高亮",
+      },
+    },
+    assets: [],
+  };
+  const source = (
+    await fs.readFile(new URL("../extension/panel.js", import.meta.url), "utf8")
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  vm.runInNewContext(source, {
+    document,
+    location: { search: "?tabId=7" },
+    URLSearchParams,
+    URL,
+    console,
+    ...model,
+    chrome: {
+      runtime: {
+        sendMessage: async (message) => {
+          if (message.type === "STATE") return { ok: true, jobs: [job] };
+          if (message.type === "TARGET")
+            return {
+              ok: true,
+              target: { id: 7, platform: "channels", role: "editor" },
+            };
+          return { ok: true };
+        },
+      },
+      tabs: {
+        query: async () => [{ id: 7 }],
+        onUpdated: { addListener() {} },
+        onActivated: { addListener() {} },
+      },
+      storage: { onChanged: { addListener() {} } },
+    },
+  });
+  await new Promise(setImmediate);
+  await new Promise(setImmediate);
+  const note = document.querySelector("article p");
+  assert.match(note.textContent, /描述已写入当前页/);
+  assert.match(note.textContent, /插件不会点发表/);
+  assert.doesNotMatch(note.textContent, /请确认视频号已高亮/);
+  assert.doesNotMatch(note.textContent, /话题「/);
+});

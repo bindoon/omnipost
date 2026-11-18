@@ -1103,6 +1103,149 @@ test("视频号描述写入编辑器内部，短标题原样保留逗号", async
   );
 });
 
+test("视频号空 contenteditable 描述写入描述框，不写进短标题", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><div><span>视频描述</span><div class="post-desc-box"><div class="input-editor" contenteditable="" data-placeholder="添加描述"></div></div></div><div><span>短标题</span><input placeholder="概括视频主要内容"></div>';
+  document.execCommand = (name, _, value) => {
+    if (name !== "insertText") return false;
+    const editor = document.querySelector(".input-editor");
+    editor.textContent = value;
+    return true;
+  };
+  const response = await run({
+    id: "channels-plain",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "经络的名字，其实是一个地址",
+    description: "对读素问和逆调论",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /文案已填入|描述和短标题/);
+  assert.equal(
+    document.querySelector(".input-editor").textContent,
+    "对读素问和逆调论",
+  );
+  assert.equal(
+    document.querySelector('input[placeholder*="概括视频"]').value,
+    "经络的名字，其实是一个地址",
+  );
+});
+
+test("视频号话题逐个追加整词，不和正文挤在同一次写入", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><div class="post-desc-box"><div class="input-editor" contenteditable="" data-placeholder="添加描述"></div></div><input placeholder="概括视频主要内容">';
+  const inserts = [];
+  document.execCommand = (name, _, value) => {
+    if (name !== "insertText" || value == null) return false;
+    inserts.push(value);
+    const editor = document.querySelector(".input-editor");
+    editor.textContent = value.startsWith("#") || value.startsWith("\n#")
+      ? editor.textContent + value
+      : value;
+    return true;
+  };
+  const response = await run({
+    id: "channels-topics",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "经络的名字，其实是一个地址",
+    description: "对读素问。\n#黄帝内经 #中医文化 #经络 #人体的河流",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.doesNotMatch(response.result.message, /没有完整写入/);
+  assert.equal(
+    document.querySelector(".input-editor").textContent,
+    "对读素问。\n#黄帝内经 #中医文化 #经络 #人体的河流 ",
+  );
+  assert.deepEqual(
+    inserts.filter((value) => value.includes("#")),
+    ["\n#黄帝内经 ", "#中医文化 ", "#经络 ", "#人体的河流 "],
+  );
+});
+
+test("视频号已有视频和短标题时只补空描述，不重复上传", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><video src="blob:existing"></video><div class="post-desc-box"><div class="input-editor" contenteditable="" data-placeholder="添加描述"></div></div><input placeholder="概括视频主要内容" value="胃经为什么被称作海">';
+  let uploads = 0;
+  document
+    .querySelector('input[type="file"]')
+    .addEventListener("change", () => uploads++);
+  const response = await run({
+    id: "channels-reuse",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "胃经，为什么被称作海",
+    description: "从五脏六腑之海写起",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /描述已写入当前页/);
+  assert.match(response.result.message, /不会点发表/);
+  assert.equal(
+    document.querySelector(".input-editor").textContent,
+    "从五脏六腑之海写起",
+  );
+  assert.equal(
+    document.querySelector('input[placeholder*="概括视频"]').value,
+    "胃经为什么被称作海",
+  );
+  assert.equal(uploads, 0);
+});
+
+test("视频号描述已有正文时不覆盖", async () => {
+  const { document, run } = mountRunner(
+    "https://channels.weixin.qq.com/platform/post/create",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><video src="blob:existing"></video><div class="input-editor" contenteditable="" data-placeholder="添加描述">已有描述</div><input placeholder="概括视频主要内容" value="胃经为什么被称作海">';
+  const response = await run({
+    id: "channels-keep",
+    kind: "video",
+    platform: "channels",
+    fillOnly: true,
+    title: "胃经，为什么被称作海",
+    description: "新的描述",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(response.result.state, "needs_attention");
+  assert.match(response.result.message, /页面已有内容/);
+  assert.equal(document.querySelector(".input-editor").textContent, "已有描述");
+});
+
 test("视频号修改页只写描述和短标题，不点完成", async () => {
   const { document, run } = mountRunner(
     "https://channels.weixin.qq.com/platform/post/coverEdit?objectId=export%2Fabc",

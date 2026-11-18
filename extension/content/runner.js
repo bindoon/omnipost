@@ -123,6 +123,50 @@
       }),
     );
   }
+  function editorText(el) {
+    if (!el) return "";
+    const text = el.matches("input,textarea") ? el.value : plainText(el);
+    const placeholder =
+      el.getAttribute("data-placeholder") || el.getAttribute("placeholder") || "";
+    return norm(text) && norm(text) !== norm(placeholder) ? text : "";
+  }
+  function isEditable(el) {
+    if (!el || !visible(el)) return false;
+    if (
+      el.matches(
+        'textarea, input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"])',
+      )
+    )
+      return true;
+    const mode = el.getAttribute("contenteditable");
+    return mode != null && mode !== "false";
+  }
+  function isShortTitle(el) {
+    if (!el?.matches?.("input,textarea")) return false;
+    const hint = `${el.getAttribute("placeholder") || ""}${el.getAttribute("aria-label") || ""}`;
+    return /短标题|概括视频/.test(hint);
+  }
+  function placeCaret(el, atStart) {
+    const doc = el.ownerDocument || document;
+    const selection = el.getRootNode().getSelection?.() || getSelection();
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    if (atStart !== undefined) range.collapse(atStart);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return doc;
+  }
+  function insertEditorText(el, value) {
+    const doc = placeCaret(el);
+    const lines = String(value).split(/\n/);
+    try {
+      doc.execCommand("insertText", false, lines[0] || "");
+      for (let i = 1; i < lines.length; i++) {
+        doc.execCommand("insertParagraph", false);
+        if (lines[i]) doc.execCommand("insertText", false, lines[i]);
+      }
+    } catch {}
+  }
   async function fillEditable(el, value) {
     if (!el) return;
     if (el.matches("input,textarea")) {
@@ -130,14 +174,8 @@
       return;
     }
     el.focus();
-    const selection = el.getRootNode().getSelection?.() || getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    selection.removeAllRanges();
-    selection.addRange(range);
-    try {
-      document.execCommand("insertText", false, value);
-    } catch {}
+    pointerClick(el);
+    insertEditorText(el, value);
     if (acceptedEditor(el, value)) return;
     await sleep(40);
     if (acceptedEditor(el, value)) return;
@@ -171,6 +209,8 @@
     );
     return true;
   }
+  const channelsEditable =
+    '[contenteditable]:not([contenteditable="false"]), textarea, input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"])';
   function channelsEditor(label) {
     const seed = queryAll("label,span,div,p,dt,h2,h3")
       .filter((el) => visible(el) && norm(el.textContent) === label)
@@ -181,14 +221,11 @@
     if (!seed) return null;
     let node = seed.parentElement;
     for (let i = 0; i < 6 && node; i++) {
-      const editor = [
-        ...node.querySelectorAll(
-          '[contenteditable="true"], textarea, input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"])',
-        ),
-      ].find(
+      const editor = queryAll(channelsEditable, node).find(
         (el) =>
-          visible(el) &&
+          isEditable(el) &&
           !seed.contains(el) &&
+          (label !== "视频描述" || !isShortTitle(el)) &&
           seed.compareDocumentPosition(el) &
             (globalThis.Node?.DOCUMENT_POSITION_FOLLOWING || 4),
       );
@@ -198,12 +235,19 @@
     return null;
   }
   function channelsDescription() {
-    return (
-      channelsEditor("视频描述") ||
-      field(
-        '.post-desc-box [contenteditable="true"], .input-editor[contenteditable="true"], textarea[placeholder*="描述"], [contenteditable="true"][data-placeholder*="描述"]',
-      )
+    const candidates = queryAll(
+      '[data-placeholder*="添加描述"], .post-desc-box [contenteditable], .input-editor[contenteditable], textarea[placeholder*="描述"]',
+    ).filter((el) => isEditable(el) && !isShortTitle(el));
+    const marked = candidates.find((el) =>
+      /添加描述/.test(
+        el.getAttribute("data-placeholder") ||
+          el.getAttribute("placeholder") ||
+          "",
+      ),
     );
+    if (marked) return marked;
+    if (candidates[0]) return candidates[0];
+    return channelsEditor("视频描述");
   }
   function channelsTitle() {
     return (
@@ -219,22 +263,31 @@
       "未找到视频号视频描述",
       timeout,
     );
-    const copy = withTopicSpaces(task.description || task.title);
+    const raw = task.description || task.title || "";
+    const topics = hashTopics(raw);
+    const body = raw.replace(/(?:^|\s)(?:#[^\s#]+[ \t]*)+$/g, "").trim();
+    const copy = withTopicSpaces(body || raw);
     await fillEditable(desc, copy);
-    if (compact(plainText(desc)) !== compact(copy))
+    if (body && topics.length && !hashTopics(body).length) {
+      for (let i = 0; i < topics.length; i++) {
+        placeCaret(desc, false);
+        try {
+          (desc.ownerDocument || document).execCommand(
+            "insertText",
+            false,
+            (i === 0 ? "\n" : "") + "#" + topics[i] + " ",
+          );
+        } catch {}
+      }
+    }
+    if (compact(plainText(desc)) !== compact(withTopicSpaces(raw)))
       note(task, "视频描述没有完整写入，请在描述框核对");
-    for (const name of hashTopics(task.description || "")) {
-      const marked = queryAll("[class*=topic],a", desc).some(
-        (el) => norm(el.textContent).replace(/^#/, "") === name,
-      );
-      if (!marked)
-        note(
-          task,
-          "话题「" + name + "」已按「#" + name + " 」写入，请确认视频号已高亮",
-        );
+    for (const name of topics) {
+      if (!plainText(desc).includes("#" + name))
+        note(task, "话题「" + name + "」没有完整写入，请在描述框核对");
     }
     const title = channelsTitle();
-    if (title) textField(title, task.title);
+    if (title && !editorText(title)) textField(title, task.title);
   }
   function douyinTitle() {
     return field(
@@ -1526,23 +1579,41 @@
         ),
       );
     }
+    let channelsReuse = false;
     if (task.fillOnly) {
       const uploaded = queryAll("video").some(
         (el) => el.currentSrc || el.src || el.querySelector("source[src]"),
       );
-      const fields =
-        task.platform === "channels"
-          ? queryAll(
-              '.post-desc-box [contenteditable="true"], .input-editor[contenteditable="true"], textarea[placeholder*="描述"], .short-title-wrap input, input[placeholder*="短标题"], input[placeholder*="概括视频"]',
-            )
-          : queryAll(
-              "input:not([type]),input[type=text],textarea,[contenteditable=true]",
-            );
-      const existing = fields.some(
-        (el) => visible(el) && norm(el.value || el.textContent),
+      if (task.platform === "channels") {
+        const desc = channelsDescription();
+        const title = channelsTitle();
+        const started = uploaded || Boolean(editorText(title));
+        if (started && desc && !editorText(desc)) channelsReuse = true;
+        else if (started || editorText(desc))
+          attention(
+            "页面已有内容，请先核对或打开空白发布页，避免覆盖或重复上传",
+          );
+      } else {
+        const fields = queryAll(
+          "input:not([type]),input[type=text],textarea,[contenteditable=true]",
+        );
+        const existing = fields.some(
+          (el) => visible(el) && norm(el.value || el.textContent),
+        );
+        if (existing || uploaded)
+          attention(
+            "页面已有内容，请先核对或打开空白发布页，避免覆盖或重复上传",
+          );
+      }
+    }
+    if (channelsReuse) {
+      await fillChannelsCopy(task, 30000);
+      attention(
+        withNotes(
+          task,
+          "描述已写入当前页；请核对后自行保存或发表。插件不会点发表",
+        ),
       );
-      if (existing || uploaded)
-        attention("页面已有内容，请先核对或打开空白发布页，避免覆盖或重复上传");
     }
     task._draftCount = /草稿箱[（(](\d+)/.exec(document.body.innerText)?.[1];
     await status(task, "uploading", "上传视频素材");

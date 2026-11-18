@@ -2,6 +2,7 @@ import {
   PLATFORMS,
   assertPlatformCopy,
   canFillCurrent,
+  shownMessage,
 } from "./shared/model.js";
 
 const app = document.querySelector("#app");
@@ -97,7 +98,7 @@ function publishedLine(job) {
 function noteHtml(job) {
   const result = job.results?.[target?.platform];
   const text = ["failed", "needs_attention"].includes(result?.state)
-    ? result.message || ""
+    ? shownMessage(result.message || "")
     : "";
   if (!text) return "";
   const info = result.state === "needs_attention";

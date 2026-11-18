@@ -361,6 +361,12 @@ export function forPlatform(task, id) {
     overrides: task.overrides,
   };
 }
+export function shownMessage(message) {
+  return String(message || "").replace(
+    /；话题「[^」]*」已按「#[^」]*」写入，请确认视频号已高亮/g,
+    "",
+  );
+}
 export function safeUrl(value) {
   try {
     const url = new URL(value);
