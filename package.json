@@ -50,8 +50,11 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
+    "@tailwindcss/vite": "^4.3.5",
     "esbuild": "^0.25.0",
     "prettier": "^3.9.10",
+    "tailwindcss": "^4.3.5",
     "vite": "^6.0.0"
   },
   "pnpm": {

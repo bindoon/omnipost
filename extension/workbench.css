@@ -1,14 +1,24 @@
+@import "tailwindcss";
+@source "./workbench.js";
+@source "./workbench.html";
+
+@theme {
+  --font-sans:
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif,
+    system-ui, sans-serif;
+  --color-brand: #0c7a5c;
+  --color-brand-dark: #0a684e;
+}
+
 :root {
-  font-family:
-    -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
-    sans-serif;
-  color: #192536;
-  background: #f5f7f9;
+  font-family: var(--font-sans);
+  color: #172033;
+  background: #f3f6f4;
   font-synthesis: none;
-  --accent: #008a69;
+  --accent: #0c7a5c;
   --muted: #7b8798;
-  --border: #e6ebf0;
-  --shadow: 0 8px 32px #24364b06;
+  --border: #e4ebe7;
+  --shadow: 0 10px 30px rgb(23 42 36 / 0.05);
 }
 * {
   box-sizing: border-box;
@@ -41,18 +51,22 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid #00a77c44;
+  outline: 3px solid #0c7a5c44;
   outline-offset: 3px;
 }
 header.top {
-  height: 82px;
-  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 64px;
+  background: rgb(255 255 255 / 0.92);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 max(32px, calc((100vw - 1200px) / 2));
-  gap: 24px;
+  padding: 12px max(32px, calc((100vw - 1200px) / 2));
+  gap: 16px 24px;
+  backdrop-filter: blur(12px);
 }
 .brand {
   display: flex;
@@ -197,10 +211,10 @@ main {
   background: white;
 }
 .step.active .step-num {
-  border-color: #008a69;
-  background: #008a69;
+  border-color: #0c7a5c;
+  background: #0c7a5c;
   color: white;
-  box-shadow: 0 0 0 5px #008a690b;
+  box-shadow: 0 0 0 5px #0c7a5c0b;
 }
 .step.done .step-num {
   border-color: #c7e7dc;
@@ -226,14 +240,22 @@ main {
 }
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.9fr);
   gap: 24px;
   align-items: start;
+}
+.workspace > aside {
+  position: sticky;
+  top: 80px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 .panel {
   background: white;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -299,7 +321,7 @@ main {
 .dropzone:hover,
 .dropzone.drag {
   background: #edf8f0;
-  border-color: #008a69;
+  border-color: #0c7a5c;
 }
 .drop-icon {
   width: 39px;
@@ -369,7 +391,7 @@ textarea {
 textarea:focus {
   outline: none;
   border-color: #6aaf93;
-  box-shadow: 0 0 0 3px #008a6908;
+  box-shadow: 0 0 0 3px #0c7a5c08;
 }
 .text-input::placeholder,
 textarea::placeholder {
@@ -440,8 +462,8 @@ textarea {
 }
 .primary {
   border: 0;
-  background: #008a69;
-  border-radius: 7px;
+  background: var(--accent);
+  border-radius: 10px;
   color: white;
   padding: 11px 20px;
   font-size: 12px;
@@ -451,7 +473,7 @@ textarea {
   gap: 12px;
 }
 .primary:hover {
-  background: #007b5d;
+  background: #0a684e;
 }
 .primary svg {
   width: 14px;
@@ -486,15 +508,15 @@ textarea {
   right: 0;
   bottom: -1px;
   height: 2px;
-  background: #008a69;
+  background: #0c7a5c;
 }
 .phone {
-  width: min(100%, 300px);
+  width: min(100%, 320px);
   margin: 0 auto;
   border: 1px solid #e4e9ed;
-  border-radius: 15px;
+  border-radius: 22px;
   background: #fff;
-  box-shadow: 0 12px 25px #32465407;
+  box-shadow: 0 16px 32px rgb(24 46 40 / 0.06);
   overflow: hidden;
   min-height: 430px;
 }
@@ -632,7 +654,7 @@ textarea {
   position: absolute;
   right: 14px;
   top: 17px;
-  accent-color: #008a69;
+  accent-color: #0c7a5c;
 }
 .platform-icon {
   width: 30px;
@@ -684,7 +706,7 @@ textarea {
   margin: 17px 0;
 }
 .check-row input {
-  accent-color: #008a69;
+  accent-color: #0c7a5c;
 }
 .job-list {
   display: flex;
@@ -756,7 +778,7 @@ textarea {
   overflow: hidden;
 }
 .progress-fill {
-  background: #008a69;
+  background: #0c7a5c;
   height: 100%;
   transition: width 0.3s;
 }
@@ -768,7 +790,7 @@ textarea {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  color: #008a69;
+  color: #0c7a5c;
   margin: 5px auto 15px;
   font-size: 24px;
 }
@@ -908,9 +930,10 @@ dialog footer {
 .content-card {
   background: #fff;
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 8px 20px 12px;
+  border-radius: 18px;
+  padding: 16px 20px 14px;
   margin-top: 14px;
+  box-shadow: var(--shadow);
 }
 .card-head {
   display: flex;
@@ -958,6 +981,10 @@ dialog footer {
   display: flex;
   flex-direction: column;
   margin-top: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fbfcfb;
 }
 .platform-sync .sync-row {
   display: grid;
@@ -1085,11 +1112,31 @@ dialog footer {
   .workspace {
     grid-template-columns: 1fr;
   }
+  .workspace > aside {
+    position: static;
+  }
   .preview-panel {
     display: none;
   }
   header.top {
-    padding: 0 22px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+  }
+  .steps {
+    position: static;
+    display: flex;
+    gap: 16px;
+    overflow-x: auto;
+  }
+  .step {
+    flex: none;
+  }
+  .step-title {
+    white-space: nowrap;
+    font-size: 12px;
+  }
+  .step:not(:last-child):after {
+    display: none;
   }
   .steps {
     padding: 20px;
@@ -1169,7 +1216,7 @@ textarea {
 
 .steps {
   position: sticky;
-  top: 12px;
+  top: 76px;
   z-index: 10;
 }
 .tailor-tabs {
@@ -1264,7 +1311,7 @@ textarea {
   overflow-wrap: anywhere;
 }
 .article-preview .phone-content:focus-visible {
-  outline: 2px solid #008a69;
+  outline: 2px solid #0c7a5c;
   outline-offset: -2px;
 }
 .article-preview .article-image-missing {
