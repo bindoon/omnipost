@@ -1,21 +1,4 @@
 import { PLATFORMS, canFillCurrent } from "./model.js";
-const EDITORS = {
-  channels: [
-    /^\/platform\/post\/create\/?$/,
-    /^\/platform\/post\/coverEdit\/?$/,
-  ],
-  xiaohongshu: [/^\/publish\/publish\/?$/],
-  x: [/^\/compose\/(post|tweet)\/?$/],
-  douyin: [
-    /^\/creator-micro\/content\/upload\/?$/,
-    /^\/creator-micro\/content\/post\/video\/?$/,
-    /^\/creator-micro\/content\/publish\/?$/,
-    /^\/content\/upload\/?$/,
-  ],
-  bilibili: [/^\/platform\/upload\/video\/frame\/?$/],
-  youtube: [/\/videos\/upload\/?$/],
-  instagram: [/^\/$/, /^\/create(?:\/|$)/],
-};
 export function platformForUrl(value) {
   try {
     const url = new URL(value);
@@ -76,16 +59,6 @@ export function youtubeChannel(value) {
     return "";
   }
 }
-const WORKS = {
-  xiaohongshu: "https://creator.xiaohongshu.com/new/note-manager",
-  douyin: "https://creator.douyin.com/creator-micro/content/manage",
-  bilibili: "https://member.bilibili.com/platform/upload-manager/video",
-  channels: "https://channels.weixin.qq.com/platform/post/list",
-  x: "https://x.com/home",
-  instagram: "https://www.instagram.com/",
-  wechat:
-    "https://mp.weixin.qq.com/cgi-bin/appmsgpublish?sub=list&begin=0&count=10",
-};
 export function worksUrl(platform, contextUrl = "") {
   if (platform === "youtube") {
     const channel = youtubeChannel(contextUrl);
@@ -93,7 +66,7 @@ export function worksUrl(platform, contextUrl = "") {
       ? "https://studio.youtube.com/channel/" + channel + "/videos"
       : "https://studio.youtube.com/";
   }
-  return WORKS[platform] || "";
+  return PLATFORMS[platform]?.worksUrl || "";
 }
 export function pageRole(value) {
   const platform = platformForUrl(value);
@@ -109,7 +82,9 @@ export function pageRole(value) {
           url.searchParams.get("type") === "10" &&
           url.searchParams.get("isNew") === "1" &&
           !url.searchParams.has("appmsgid")
-        : (EDITORS[platform] || []).some((re) => re.test(url.pathname));
+        : (PLATFORMS[platform].editorPaths || []).some((re) =>
+            re.test(url.pathname),
+          );
   } catch {}
   return { role: editor ? "editor" : "site", platform, url: value };
 }
@@ -127,8 +102,8 @@ export function assertTarget(job, tab) {
     (job.kind === "article" && platform !== "wechat")
   )
     throw new Error("当前页不支持此内容类型");
-  const state = job.results[platform]?.state;
-  if (!canFillCurrent(platform, state, job.kind))
+  const result = job.results[platform];
+  if (!canFillCurrent(platform, result, job.kind))
     throw new Error("该平台已有处理记录，请先检查原页面，避免重复上传");
   if (pageRole(tab.url).role !== "editor")
     throw new Error(

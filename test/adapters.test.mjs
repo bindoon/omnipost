@@ -1,12 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
+import { build } from "esbuild";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { parseHTML, DOMParser } from "linkedom";
-const source = await fs.readFile(
-  new URL("../extension/content/runner.js", import.meta.url),
-  "utf8",
-);
+const {
+  outputFiles: [runner],
+} = await build({
+  entryPoints: [
+    fileURLToPath(new URL("../extension/content/runner.js", import.meta.url)),
+  ],
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "chrome116",
+  write: false,
+});
+const source = runner.text;
 const wechatEditor =
   "https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&isNew=1&type=10&token=session-token&lang=zh_CN";
 async function runWechat({
@@ -328,6 +338,7 @@ for (const withImage of [false, true])
       }
       const context = vm.createContext({
         document,
+        URL,
         location: {
           origin: "https://creator.xiaohongshu.com",
           pathname: "/publish/publish",
@@ -492,6 +503,7 @@ for (const misplace of [false, true])
       }
       const context = vm.createContext({
         document,
+        URL,
         location: {
           origin: "https://x.com",
           pathname: "/compose/articles/edit/123",
@@ -663,6 +675,7 @@ test("X 视频上传不受字数进度圈阻塞，文案只写一次，保存后
   }
   const context = vm.createContext({
     document,
+    URL,
     location: {
       origin: "https://x.com",
       pathname: "/compose/post",
@@ -791,6 +804,7 @@ test("小红书视频等上传封面就绪后再填文案，并通过组件内�
   }
   const context = vm.createContext({
     document,
+    URL,
     location: {
       origin: "https://creator.xiaohongshu.com",
       pathname: "/publish/publish",
@@ -859,7 +873,7 @@ test("小红书视频等上传封面就绪后再填文案，并通过组件内�
   assert.match(response.result.warnings[0], /AI 内容声明/);
 });
 
-function mountRunner(href) {
+function mountRunner(href, { onAsset, onStatus } = {}) {
   const { document, window } = parseHTML("<html><body></body></html>");
   window.HTMLElement.prototype.getBoundingClientRect = () => ({
     width: 120,
@@ -890,6 +904,7 @@ function mountRunner(href) {
   }
   const context = vm.createContext({
     document,
+    URL,
     location: { origin: url.origin, pathname: url.pathname, href },
     chrome: {
       runtime: {
@@ -898,10 +913,13 @@ function mountRunner(href) {
             listener = fn;
           },
         },
-        sendMessage: async (message) =>
-          message.type === "ASSET"
-            ? { ok: true, chunk: Buffer.from("cover").toString("base64") }
-            : { ok: true },
+        sendMessage: async (message) => {
+          if (message.type === "CONTENT_STATUS")
+            return (await onStatus?.(message.patch)) ?? { ok: true };
+          if (message.type !== "ASSET") return { ok: true };
+          await onAsset?.(message);
+          return { ok: true, chunk: Buffer.from("cover").toString("base64") };
+        },
       },
     },
     File,
@@ -957,18 +975,30 @@ function armCoverDialog(document, opener, confirmText, extras) {
   return names;
 }
 
-test("小红书填入视频时打开封面弹窗并上传竖封面", async () => {
+test("小红书填入视频时使用封面预览上的隐藏编辑入口并切换竖版裁剪", async () => {
   const { document, run } = mountRunner(
     "https://creator.xiaohongshu.com/publish/publish",
   );
   document.body.innerHTML =
-    '<span>草稿箱(0)</span><input type="file" accept="video/mp4"><input placeholder="填写标题"><div contenteditable="true"></div><button id="edit-cover">编辑封面</button><xhs-publish-btn save-disabled="true"></xhs-publish-btn><button id="save">暂存离开</button>';
+    '<span>草稿箱(0)</span><input type="file" accept="video/mp4"><input placeholder="填写标题"><div contenteditable="true"></div><div>设置封面</div><div id="cover-tile"><button id="edit-cover">编辑封面</button></div><xhs-publish-btn save-disabled="true"></xhs-publish-btn><button id="save">暂存离开</button>';
   const host = document.querySelector("xhs-publish-btn");
-  const names = armCoverDialog(
-    document,
-    document.querySelector("#edit-cover"),
-    "完成",
-  );
+  const opener = document.querySelector("#edit-cover");
+  opener.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  let ratioSelected = false;
+  const names = armCoverDialog(document, opener, "完成", (dialog) => {
+    const crop = document.createElement("button");
+    crop.textContent = "裁剪";
+    crop.onclick = () => {
+      const ratio = document.createElement("button");
+      ratio.textContent = "3:4";
+      ratio.onclick = () => {
+        ratio.setAttribute("aria-pressed", "true");
+        ratioSelected = true;
+      };
+      dialog.append(ratio);
+    };
+    dialog.append(crop);
+  });
   document.querySelector("input[type=file]").onchange = () => {
     setTimeout(() => {
       const preview = document.createElement("div");
@@ -976,7 +1006,7 @@ test("小红书填入视频时打开封面弹窗并上传竖封面", async () =>
         "style",
         "background-image:url(https://xhscdn.com/spectrum/fixture)",
       );
-      document.body.append(preview);
+      document.querySelector("#cover-tile").append(preview);
       host.setAttribute("save-disabled", "false");
     }, 20);
   };
@@ -1003,7 +1033,191 @@ test("小红书填入视频时打开封面弹窗并上传竖封面", async () =>
   });
   assert.equal(response.result.state, "draft_ready", response.result.message);
   assert.deepEqual(names, ["portrait.png"]);
+  assert.equal(ratioSelected, true);
 });
+
+for (const [name, submit, missingDisclosure, rejectedStatus] of [
+  ["仅填入时不提交", false, false],
+  ["只在授权后提交", true, false],
+  ["声明无法核对时保留定时并停在提交前", true, true],
+  ["后台没有确认提交状态时停在点击前", true, false, true],
+]) {
+  test(`小红书原生定时${name}并核对合集和整点`, async () => {
+    const { document, run } = mountRunner(
+      "https://creator.xiaohongshu.com/publish/publish",
+      {
+        onStatus: ({ state }) =>
+          rejectedStatus && state === "submitting"
+            ? { ok: false, error: "提交状态未保存" }
+            : { ok: true },
+      },
+    );
+    document.body.innerHTML = `
+      <input id="video" type="file" accept="video/mp4">
+      <input placeholder="填写标题"><div contenteditable="true"></div>
+      <div id="cover-tile"><button id="edit">编辑封面</button></div>
+      <xhs-publish-btn save-disabled="true"></xhs-publish-btn>
+      <section><span>加入合集</span><button id="collection">选择合集</button></section>
+      <button id="ai">添加内容类型声明</button>
+      <label><input id="timed" type="checkbox"><span>定时发布</span></label>
+      <button id="immediate">发布</button>`;
+    const checks = { submits: 0, immediate: 0 };
+    document.querySelector("#video").onchange = () => {
+      const tile = document.querySelector("#cover-tile");
+      tile.setAttribute(
+        "style",
+        "background-image:url(https://xhscdn.com/spectrum/fixture)",
+      );
+      document
+        .querySelector("xhs-publish-btn")
+        .setAttribute("save-disabled", "false");
+    };
+    const files = armCoverDialog(
+      document,
+      document.querySelector("#edit"),
+      "完成",
+      (dialog) => {
+        const ratio = document.createElement("button");
+        ratio.textContent = "3:4";
+        ratio.onclick = () => ratio.setAttribute("aria-pressed", "true");
+        dialog.append(ratio);
+      },
+    );
+    function button(name, callback) {
+      const el = document.createElement("button");
+      el.textContent = name;
+      el.onclick = callback;
+      return el;
+    }
+    const collection = document.querySelector("#collection");
+    collection.onclick = () => {
+      const option = button("中医：人体的河流", () => {
+        collection.textContent = option.textContent;
+        option.remove();
+      });
+      document.body.append(option);
+    };
+    const ai = document.querySelector("#ai");
+    if (missingDisclosure) ai.remove();
+    ai.onclick = () => {
+      const option = button("笔记含AI合成内容", () => {
+        ai.textContent = option.textContent;
+        option.remove();
+      });
+      document.body.append(option);
+    };
+    document.querySelector("#immediate").onclick = () => checks.immediate++;
+    document.querySelector("#timed").onclick = () => {
+      document.querySelector("#timed").checked = true;
+      const date = document.createElement("input");
+      date.value = "2035-11-18 22:25";
+      document.body.append(date);
+      const reservation = button("定时发布", () => {
+        checks.submits++;
+        checks.date = date.value;
+        checks.collection = collection.textContent;
+        checks.ai = ai.textContent;
+        document.body.innerHTML = "<p>发布成功</p>";
+      });
+      document.body.append(reservation);
+      date.onclick = () => {
+        const picker = document.createElement("div");
+        const calendar = document.createElement("section");
+        picker.innerHTML = "<h6>2035年</h6><h6>11月</h6>";
+        for (let day = 1; day <= 30; day++)
+          calendar.append(
+            button(String(day), () => {
+              date.value = `2035-11-${String(day).padStart(2, "0")}${date.value.slice(10)}`;
+            }),
+          );
+        picker.append(calendar);
+        for (const last of [23, 59]) {
+          const column = document.createElement("section");
+          for (let index = 0; index <= last; index++) {
+            const value = String(index).padStart(2, "0");
+            column.append(
+              button(value, () => {
+                date.value =
+                  last === 23
+                    ? `${date.value.slice(0, 11)}${value}${date.value.slice(13)}`
+                    : `${date.value.slice(0, 14)}${value}`;
+              }),
+            );
+          }
+          picker.append(column);
+        }
+        document.body.append(picker);
+      };
+    };
+    const response = await run({
+      id: "xhs-schedule",
+      kind: "video",
+      platform: "xiaohongshu",
+      title: "脾经：从足大趾到舌根",
+      description: "保留完整的描述",
+      aiGenerated: true,
+      schedule: {
+        at: "2035-11-20T07:00:00+08:00",
+        collection: "中医：人体的河流",
+        submit,
+      },
+      assets: [
+        {
+          id: "v",
+          role: "video",
+          name: "video.mp4",
+          type: "video/mp4",
+          size: 5,
+        },
+        {
+          id: "p",
+          role: "cover-portrait",
+          name: "cover.png",
+          type: "image/png",
+          size: 5,
+        },
+        {
+          id: "l",
+          role: "cover-landscape",
+          name: "wide.png",
+          type: "image/png",
+          size: 5,
+        },
+      ],
+    });
+    assert.equal(
+      response.result.state,
+      submit && !missingDisclosure && !rejectedStatus
+        ? "scheduled"
+        : "schedule_ready",
+      response.result.message,
+    );
+    assert.equal(response.result.scheduledAt, "2035-11-20T07:00:00+08:00");
+    assert.deepEqual(files, ["cover.png"]);
+    assert.equal(checks.immediate, 0);
+    if (submit && !missingDisclosure && !rejectedStatus) {
+      assert.deepEqual(checks, {
+        submits: 1,
+        immediate: 0,
+        date: "2035-11-20 07:00",
+        collection: "中医：人体的河流",
+        ai: "笔记含AI合成内容",
+      });
+    } else {
+      assert.equal(checks.submits, 0);
+      if (missingDisclosure)
+        assert.match(response.result.message, /AI 声明待确认/);
+      assert.equal(
+        document.querySelector('input[placeholder="填写标题"]').value,
+        "脾经：从足大趾到舌根",
+      );
+      assert.equal(
+        document.querySelector("[contenteditable]").textContent,
+        "保留完整的描述",
+      );
+    }
+  });
+}
 
 test("视频号分别把竖封面和横封面写入两张卡片", async () => {
   const { document, run } = mountRunner(
@@ -1153,9 +1367,10 @@ test("视频号话题逐个追加整词，不和正文挤在同一次写入", as
     if (name !== "insertText" || value == null) return false;
     inserts.push(value);
     const editor = document.querySelector(".input-editor");
-    editor.textContent = value.startsWith("#") || value.startsWith("\n#")
-      ? editor.textContent + value
-      : value;
+    editor.textContent =
+      value.startsWith("#") || value.startsWith("\n#")
+        ? editor.textContent + value
+        : value;
     return true;
   };
   const response = await run({
@@ -1277,7 +1492,7 @@ test("视频号修改页只写描述和短标题，不点完成", async () => {
     "对读素问和逆调论",
   );
   assert.equal(
-    document.querySelector('input[placeholder], input').value,
+    document.querySelector("input[placeholder], input").value,
     "经络的名字，其实是一个地址",
   );
 });
@@ -1362,6 +1577,108 @@ test("抖音填入视频时打开封面弹窗并上传封面", async () => {
     "对读素问和逆调论",
   );
   assert.deepEqual(names, ["portrait.png"]);
+});
+
+test("抖音先上传竖封面，待横封面可用后再上传并确认", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/upload",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><div class="zone-container" contenteditable="true"></div><button id="pick-cover">选择封面</button>';
+  const steps = [];
+  document.querySelector("#pick-cover").onclick = () => {
+    const modal = document.createElement("div");
+    modal.innerHTML =
+      '<p>竖封面预览（3:4）</p><button>上传封面</button><input type="file" accept="image/jpeg"><button id="finish" disabled>完成</button><button id="horizontal" disabled>设置横封面</button>';
+    document.body.append(modal);
+    const preview = modal.querySelector("p");
+    const horizontal = modal.querySelector("#horizontal");
+    const done = modal.querySelector("#finish");
+    modal.querySelector('input[type="file"]').onchange = (event) => {
+      steps.push([preview.textContent, event.target.files[0].name]);
+      if (preview.textContent.startsWith("竖")) horizontal.disabled = false;
+      else done.disabled = false;
+    };
+    horizontal.onclick = () => {
+      preview.textContent = "横封面预览（4:3）";
+      horizontal.remove();
+    };
+    done.onclick = () => modal.remove();
+  };
+  const response = await run({
+    id: "douyin-dual-cover",
+    kind: "video",
+    platform: "douyin",
+    fillOnly: true,
+    title: "十二经脉",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "l",
+        role: "cover-landscape",
+        name: "wide.jpg",
+        type: "image/jpeg",
+        size: 5,
+      },
+      {
+        id: "p",
+        role: "cover-portrait",
+        name: "tall.jpg",
+        type: "image/jpeg",
+        size: 5,
+      },
+    ],
+  });
+  assert.match(response.result.message, /封面已填入/);
+  assert.deepEqual(steps, [
+    ["竖封面预览（3:4）", "tall.jpg"],
+    ["横封面预览（4:3）", "wide.jpg"],
+  ]);
+  assert.equal(document.querySelector("#finish"), null);
+});
+
+test("抖音只有单方向封面窗口时，分别从横竖卡片保存", async () => {
+  const { document, run } = mountRunner(
+    "https://creator.douyin.com/creator-micro/content/upload",
+  );
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4"><input placeholder="填写作品标题"><div><button id="tall">选择封面</button><span>竖封面3:4</span></div><div><button id="wide">选择封面</button><span>横封面4:3</span></div>';
+  const install = (id, label) =>
+    armCoverDialog(document, document.querySelector(id), "完成", (dialog) => {
+      const preview = document.createElement("p");
+      preview.textContent = label;
+      dialog.append(preview);
+    });
+  const tall = install("#tall", "竖封面预览（3:4）");
+  const wide = install("#wide", "横封面预览（4:3）");
+  const response = await run({
+    id: "douyin-separate-covers",
+    kind: "video",
+    platform: "douyin",
+    title: "十二经脉",
+    fillOnly: true,
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "l",
+        role: "cover-landscape",
+        name: "wide.jpg",
+        type: "image/jpeg",
+        size: 5,
+      },
+      {
+        id: "p",
+        role: "cover-portrait",
+        name: "tall.jpg",
+        type: "image/jpeg",
+        size: 5,
+      },
+    ],
+  });
+  assert.match(response.result.message, /封面已填入/);
+  assert.deepEqual(tall, ["tall.jpg"]);
+  assert.deepEqual(wide, ["wide.jpg"]);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
 });
 
 test("小红书封面窗口里有 3:4 时会选中后再保存", async () => {
@@ -1550,6 +1867,387 @@ test("B 站填入标题、标签和封面，不点击投稿", async () => {
   assert.deepEqual(names, ["landscape.png"]);
 });
 
+test("B 站读取文件后选取当前表单隐藏上传框，跳过附属应用的输入框", async () => {
+  const { document, run } = mountRunner(
+    "https://member.bilibili.com/platform/upload/video/frame",
+    {
+      onAsset: () => {
+        if (current) return;
+        current = stale.cloneNode();
+        current.getBoundingClientRect = stale.getBoundingClientRect;
+        current.addEventListener("change", () => {
+          uploads.push(current.files[0].name);
+        });
+        stale.replaceWith(current);
+      },
+    },
+  );
+  document.body.innerHTML = `
+    <div class="micro-app"><input id="aux" type="file" accept="video/mp4"></div>
+    <input type="file" accept=".txt">
+    <div class="upload-wrp"><div class="bcc-upload-wrapper">
+      <input id="video" type="file" accept=".mp4,.mov" style="display:none">
+    </div></div>
+    <input placeholder="请输入稿件标题">
+    <div class="ql-editor" contenteditable="true"></div>`;
+  const stale = document.querySelector("#video");
+  let current;
+  const uploads = [];
+  stale.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  stale.addEventListener("change", () => uploads.push("stale"));
+  document
+    .querySelector("#aux")
+    .addEventListener("change", () => uploads.push("aux"));
+  const response = await run({
+    id: "bili-live-input",
+    kind: "video",
+    platform: "bilibili",
+    title: "一期视频的标题",
+    description: "简介正文",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /视频和文案已填入/);
+  assert.deepEqual(uploads, ["video.mp4"]);
+  assert.equal(current.isConnected, true);
+  assert.equal(stale.isConnected, false);
+});
+
+test("B 站从完整封面编辑器找到隐藏文件框，并核对新封面留在稿件", async () => {
+  const { document, run } = mountRunner(
+    "https://member.bilibili.com/platform/upload/video/frame",
+  );
+  document.body.innerHTML = `
+    <input type="file" accept="video/mp4">
+    <input placeholder="请输入稿件标题">
+    <div class="ql-editor" contenteditable="true"></div>
+    <div class="cover-empty"><button class="add-text">添加封面</button></div>`;
+  const covers = [];
+  let wrongConfirm = 0;
+  let actualConfirm = 0;
+  const empty = document.querySelector(".cover-empty");
+  empty.querySelector("button").onclick = () => {
+    const editor = document.createElement("div");
+    editor.className = "cover-editor";
+    editor.innerHTML = `
+      <div><span>上传封面说明</span><button id="wrong">完成</button></div>
+      <div class="cover-upload">
+        <input type="file" accept="image/png, image/jpeg" style="display:none">
+        <div class="upload-area has-image"></div>
+      </div>
+      <div class="cover-editor-button"><button class="button submit">完成</button></div>`;
+    document.body.append(editor);
+    editor.querySelector("#wrong").onclick = () => wrongConfirm++;
+    const preview = editor.querySelector(".upload-area");
+    preview.style.backgroundImage = 'url("blob:default-preview")';
+    const input = editor.querySelector('input[type="file"]');
+    input.addEventListener("change", () => {
+      covers.push(input.files[0].name);
+      preview.style.backgroundImage = 'url("blob:local-upload")';
+    });
+    editor.querySelector(".button.submit").onclick = () => {
+      actualConfirm++;
+      assert.match(preview.style.backgroundImage, /blob:local-upload/);
+      const saved = document.createElement("img");
+      saved.className = "cover-img";
+      empty.replaceWith(saved);
+      editor.remove();
+    };
+  };
+  const response = await run({
+    id: "bili-cover-editor",
+    kind: "video",
+    platform: "bilibili",
+    title: "一期视频的标题",
+    description: "简介正文",
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "l",
+        role: "cover-landscape",
+        name: "landscape.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    "needs_attention",
+    response.result.message,
+  );
+  assert.match(response.result.message, /标题、简介和封面已填入/);
+  assert.deepEqual(covers, ["landscape.png"]);
+  assert.equal(wrongConfirm, 0);
+  assert.equal(actualConfirm, 1);
+  assert.ok(document.querySelector(".cover-img"));
+  assert.equal(document.querySelector(".cover-editor"), null);
+});
+
+for (const [platform, url, hoursFromNow, expected] of [
+  [
+    "bilibili",
+    "https://member.bilibili.com/platform/upload/video/frame",
+    16 * 24,
+    /15 天内/,
+  ],
+  [
+    "douyin",
+    "https://creator.douyin.com/creator-micro/content/upload",
+    1,
+    /提前 120 分钟/,
+  ],
+]) {
+  test(`${platform} 的预约时间超出窗口，在读取视频前停止`, async () => {
+    let assetReads = 0;
+    const { document, run } = mountRunner(url, { onAsset: () => assetReads++ });
+    const at =
+      new Date(Date.now() + (hoursFromNow + 8) * 3_600_000)
+        .toISOString()
+        .slice(0, 16) + ":00+08:00";
+    document.body.innerHTML =
+      '<input type="file" accept="video/mp4"><input placeholder="请输入稿件标题">';
+    const response = await run({
+      id: "out-of-window",
+      kind: "video",
+      platform,
+      title: "人体如河网",
+      schedule: { at },
+      assets: [
+        { id: "v", role: "video", name: "v.mp4", type: "video/mp4", size: 5 },
+      ],
+    });
+    assert.equal(response.result.state, "needs_attention");
+    assert.match(response.result.message, expected);
+    assert.equal(assetReads, 0);
+    assert.equal(
+      document.querySelector('input[type="file"]').files?.length || 0,
+      0,
+    );
+    assert.equal(document.querySelector("input[placeholder]").value, "");
+  });
+}
+
+async function verifyBilibiliScheduleCase(needsReview) {
+  const { document, run } = mountRunner(
+    "https://member.bilibili.com/platform/upload/video/frame",
+  );
+  document.body.innerHTML = `
+    <input type="file" accept="video/mp4">
+    <input placeholder="请输入稿件标题">
+    <div class="ql-editor" contenteditable="true"></div>
+    <button class="cover-empty" id="cover">添加封面</button>
+    <div class="selector-container">
+      <button class="select-controller">vlog</button>
+    </div>
+    <input placeholder="请选择符合您视频内容的创作声明" readonly>
+    <div class="time-container"><button class="switch-container">开关</button></div>
+    <div class="submit-actions"><span class="submit-add">立即投稿</span></div>`;
+  const tomorrow = new Date(Date.now() + 32 * 3600_000)
+    .toISOString()
+    .slice(0, 10);
+  const today = new Date(Date.parse(tomorrow) - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const [year, month, day] = tomorrow.split("-").map(Number);
+  const scheduledAt = tomorrow + "T07:05:00+08:00";
+  const cover = document.querySelector("#cover");
+  const names = needsReview ? [] : armCoverDialog(document, cover, "完成");
+  const create = (tag, text, host, css) => {
+    const el = document.createElement(tag);
+    el.textContent = text;
+    if (css) el.className = css;
+    host.append(el);
+    return el;
+  };
+  const category = document.querySelector(".select-controller");
+  category.onclick = () => {
+    const item = create(
+      "div",
+      "知识",
+      category.parentElement,
+      "drop-list-v2-item-cont",
+    );
+    item.onclick = () => {
+      category.textContent = item.textContent;
+      item.remove();
+    };
+  };
+  const declaration = document.querySelector('input[placeholder*="创作声明"]');
+  declaration.onclick = () => {
+    const choice = create("button", "含AI生成内容", document.body);
+    choice.onclick = () => {
+      declaration.value = choice.textContent;
+      choice.remove();
+    };
+  };
+  const toggle = document.querySelector(".switch-container");
+  toggle.onclick = () => {
+    toggle.classList.add("switch-container-active");
+    const area = toggle.parentElement;
+    const date = create("div", "", area, "date-picker-date");
+    const displayDate = create("span", today, date, "date-show");
+    date.onclick = () => {
+      const picker = create("div", "", area, "date-wrp");
+      create(
+        "span",
+        year + "年" + month + "月",
+        picker,
+        "date-picker-nav-title",
+      );
+      const pick = create(
+        "span",
+        String(day),
+        picker,
+        "date-picker-body-item date-item",
+      );
+      pick.onclick = () => {
+        displayDate.textContent = tomorrow;
+        picker.remove();
+      };
+    };
+    const timer = create("div", "", area, "date-picker-timer");
+    const displayTime = create("div", "12:14", timer, "date-show");
+    displayTime.onclick = () => {
+      const picker = create("div", "", area);
+      for (const [index, wanted] of ["07", "05"].entries()) {
+        const column = create(
+          "div",
+          "",
+          picker,
+          "time-picker-panel-select-wrp",
+        );
+        const pick = create(
+          "span",
+          wanted,
+          column,
+          "time-picker-panel-select-item",
+        );
+        pick.onclick = () => {
+          const parts = displayTime.textContent.split(":");
+          parts[index] = wanted;
+          displayTime.textContent = parts.join(":");
+          picker.remove();
+        };
+      }
+    };
+    const zone = create("div", "", area, "date-picker-timezone-wrp");
+    create("input", "", zone).value = "(UTC+08:00) Beijing";
+  };
+  let syncChoices = 0;
+  let syncEdits = 0;
+  const open = cover.onclick;
+  cover.onclick = () => {
+    assert.equal(category.textContent, "知识");
+    assert.equal(declaration.value, "含AI生成内容");
+    assert.equal(
+      document.querySelector(".date-picker-date .date-show").textContent,
+      tomorrow,
+    );
+    assert.equal(
+      document.querySelector(".date-picker-timer .date-show").textContent,
+      "07:05",
+    );
+    if (!needsReview) return open();
+    const editor = create("div", "", document.body, "cover-editor");
+    const sync = create("div", "", editor, "sync-checkbox-wrapper");
+    const checkbox = create("label", "双比例同步改动", sync, "bcc-checkbox");
+    checkbox.onclick = () => {
+      checkbox.classList.toggle("bcc-checkbox-checked");
+      syncEdits++;
+    };
+    const upload = create("div", "", editor, "cover-upload");
+    const preview = create("div", "", upload, "upload-area has-image");
+    const input = create("input", "", upload);
+    input.setAttribute("type", "file");
+    input.setAttribute("accept", "image/png");
+    input.onchange = () => {
+      assert.equal(checkbox.classList.contains("bcc-checkbox-checked"), true);
+      names.push(input.files[0].name);
+      preview.style.backgroundImage = 'url("blob:local-upload")';
+    };
+    const buttons = create("div", "", editor, "cover-editor-button");
+    create("button", "完成", buttons, "button submit").onclick = () => {
+      const review = create(
+        "div",
+        "检测到个人空间封面（16:9）未修改",
+        document.body,
+        "sync-review",
+      );
+      for (const choice of ["不同步，手动编辑", "确认同步"])
+        create("button", choice, review).onclick = () => syncChoices++;
+    };
+  };
+  let published = 0;
+  document.querySelector(".submit-add").onclick = () => published++;
+  const response = await run({
+    id: "bili-schedule",
+    kind: "video",
+    platform: "bilibili",
+    title: "人体如河网",
+    description: "河网与经络",
+    category: "知识",
+    aiGenerated: true,
+    schedule: { at: scheduledAt, submit: false },
+    assets: [
+      { id: "v", role: "video", name: "video.mp4", type: "video/mp4", size: 5 },
+      {
+        id: "p",
+        role: "cover-portrait",
+        name: "portrait.png",
+        type: "image/png",
+        size: 5,
+      },
+      {
+        id: "l",
+        role: "cover-landscape",
+        name: "landscape.png",
+        type: "image/png",
+        size: 5,
+      },
+    ],
+  });
+  assert.equal(
+    response.result.state,
+    needsReview ? "needs_attention" : "schedule_ready",
+    response.result.message,
+  );
+  assert.equal(
+    response.result.scheduledAt,
+    scheduledAt,
+    response.result.message,
+  );
+  assert.equal(response.result.persisted, false);
+  assert.equal(category.textContent, "知识");
+  assert.equal(declaration.value, "含AI生成内容");
+  assert.equal(published, 0);
+  assert.deepEqual(names, ["landscape.png"]);
+  if (needsReview) {
+    assert.match(response.result.message, /核对 16:9 个人空间封面/);
+    assert.equal(
+      response.result.evidence,
+      `B 站编辑器显示定时 ${tomorrow} 07:05 (UTC+08:00)`,
+    );
+    assert.ok(document.querySelector(".sync-review"));
+    assert.equal(syncEdits, 1);
+    assert.equal(syncChoices, 0);
+  }
+}
+
+test("B 站填写指定分区及原生定时，保留投稿供核对", () => {
+  return verifyBilibiliScheduleCase(false);
+});
+
+test("B 站封面同步弹窗保留已核对的预约时间，交由人选择", () => {
+  return verifyBilibiliScheduleCase(true);
+});
+
 test("YouTube 替换缩略图只写入缩略图文件框，不碰视频选择框", async () => {
   const { document, send } = mountRunner(
     "https://studio.youtube.com/channel/UC1/videos/upload",
@@ -1558,8 +2256,7 @@ test("YouTube 替换缩略图只写入缩略图文件框，不碰视频选择框
     '<input name="Filedata" type="file" accept="video/mp4"><button id="pick">上传缩略图</button>';
   const host = document.createElement("ytcp-thumbnails-compact-editor");
   const shadow = host.attachShadow({ mode: "open" });
-  shadow.innerHTML =
-    '<input id="file-loader" type="file" accept="image/jpeg">';
+  shadow.innerHTML = '<input id="file-loader" type="file" accept="image/jpeg">';
   document.body.append(host);
   const names = [];
   let picked = 0;
@@ -1574,9 +2271,13 @@ test("YouTube 替换缩略图只写入缩略图文件框，不碰视频选择框
   });
   assert.equal(response.ok, true, response.error);
   assert.deepEqual(names, ["wide.jpg"]);
-  assert.equal(document.querySelector('[name="Filedata"]').files?.length || 0, 0);
+  assert.equal(
+    document.querySelector('[name="Filedata"]').files?.length || 0,
+    0,
+  );
   assert.equal(picked, 0);
-  document.body.innerHTML = '<input name="Filedata" type="file" accept="video/mp4">';
+  document.body.innerHTML =
+    '<input name="Filedata" type="file" accept="video/mp4">';
   const early = await send({
     type: "PLACE_COVER",
     name: "wide.jpg",
@@ -1724,6 +2425,7 @@ for (const existing of [
     const messages = [];
     vm.runInNewContext(source, {
       document,
+      URL,
       location: {
         origin: "https://x.com",
         pathname: "/compose/post",

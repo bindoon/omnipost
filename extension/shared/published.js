@@ -67,6 +67,13 @@ export function matchPublished(entries, items) {
       results[entry.id] = { found: false, reason: "标题和其他内容撞了" };
       continue;
     }
+    if (hit.pendingStatus) {
+      results[entry.id] = {
+        found: false,
+        reason: "平台状态为「" + hit.pendingStatus + "」",
+      };
+      continue;
+    }
     results[entry.id] = {
       found: true,
       likes: Number.isFinite(hit.likes) ? hit.likes : parseCount(hit.likesText),

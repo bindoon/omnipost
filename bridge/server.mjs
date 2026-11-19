@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -10,9 +11,14 @@ import {
   retryable,
   TERMINAL,
   safeUrl,
+  validSha256,
 } from "../extension/shared/model.js";
 import { DOMParser } from "linkedom";
 import { renderArticle } from "../extension/shared/content.js";
+import {
+  NATIVE_SCHEDULE_CAPABILITY,
+  PLATFORMS,
+} from "../extension/shared/platforms/index.js";
 const CHUNK = 1024 ** 2;
 const equal = (a, b) => {
   if (typeof a !== "string") return false;
@@ -39,6 +45,86 @@ export async function startBridge({
   const jobsDir = path.join(dataDir, "jobs");
   await fs.mkdir(jobsDir, { recursive: true });
   const jobs = new Map();
+  const fingerprints = new Map();
+  async function assetFingerprint(asset) {
+    if (validSha256(asset.sha256)) return asset.sha256;
+    if (!asset.filePath || !Number.isFinite(asset.mtimeMs)) return null;
+    const stat = await fs.stat(asset.filePath).catch(() => null);
+    if (
+      !stat?.isFile() ||
+      stat.size !== asset.size ||
+      stat.mtimeMs !== asset.mtimeMs
+    )
+      return null;
+    const sourceStamp = (st) => [
+      st.size,
+      st.mtimeMs,
+      st.ctimeMs,
+      st.dev,
+      st.ino,
+    ];
+    const key = JSON.stringify([asset.filePath, ...sourceStamp(stat)]);
+    const cached = fingerprints.get(key);
+    if (cached) return cached;
+    const result = (async () => {
+      const hash = crypto.createHash("sha256");
+      for await (const chunk of createReadStream(asset.filePath))
+        hash.update(chunk);
+      const after = await fs.stat(asset.filePath);
+      return JSON.stringify([asset.filePath, ...sourceStamp(after)]) === key
+        ? hash.digest("hex")
+        : null;
+    })().catch(() => null);
+    fingerprints.set(key, result);
+    result.then((sha) => {
+      if (!sha) fingerprints.delete(key);
+    });
+    return result;
+  }
+  function videoRequestKey(job) {
+    return JSON.stringify([
+      job.title,
+      job.description ?? "",
+      job.delivery === "manual" ? "manual" : "auto",
+      Boolean(job.aiGenerated),
+      job.schedule ?? null,
+      [...job.platforms].sort().map((id) => {
+        const o = job.overrides?.[id];
+        return [
+          id,
+          o?.title ?? job.title,
+          o?.description ?? job.description,
+          o?.tags ?? "",
+          o?.collection ?? job.schedule?.collection ?? "",
+          o?.category ?? "",
+        ];
+      }),
+      job.assets.map(({ role, type, size }) => [role, type, size]),
+    ]);
+  }
+  async function identicalVideoTask(task) {
+    const key = videoRequestKey(task);
+    for (const existing of jobs.values()) {
+      if (existing.kind !== "video" || videoRequestKey(existing) !== key)
+        continue;
+      const hashes = await Promise.all(existing.assets.map(assetFingerprint));
+      if (
+        hashes.every((sha, index) => sha && sha === task.assets[index].sha256)
+      )
+        return existing;
+    }
+    return null;
+  }
+  function recover(r) {
+    if (TERMINAL.has(r.state) || r.state === "queued") return;
+    const uncertain = r.state === "submitting";
+    Object.assign(r, {
+      state: uncertain ? "schedule_unconfirmed" : "needs_attention",
+      message: uncertain
+        ? "定时提交结果不明，请先核对平台作品列表"
+        : "服务曾中断，请检查平台现有草稿后再重试",
+    });
+  }
   let workerCapabilities = [];
   let worker = null,
     active = null,
@@ -83,13 +169,7 @@ export async function startBridge({
     if (!name.endsWith(".json")) continue;
     try {
       const j = JSON.parse(await fs.readFile(path.join(jobsDir, name), "utf8"));
-      for (const r of Object.values(j.results)) {
-        if (!TERMINAL.has(r.state) && r.state !== "queued")
-          Object.assign(r, {
-            state: "needs_attention",
-            message: "服务曾中断，请检查平台现有草稿后再重试",
-          });
-      }
+      for (const r of Object.values(j.results)) recover(r);
       jobs.set(j.id, j);
     } catch {}
   }
@@ -115,11 +195,22 @@ export async function startBridge({
   function done(j) {
     return Object.values(j.results).every((r) => TERMINAL.has(r.state));
   }
+  function supportsSchedule(job) {
+    if (!job.schedule) return true;
+    return (
+      workerCapabilities.includes(NATIVE_SCHEDULE_CAPABILITY) &&
+      job.platforms.every((id) => {
+        const capability = PLATFORMS[id]?.schedule?.capability;
+        return !capability || workerCapabilities.includes(capability);
+      })
+    );
+  }
   async function dispatch() {
     if (!worker || worker.readyState !== WebSocket.OPEN || active || closing)
       return;
     const j = [...jobs.values()].find(
       (j) =>
+        supportsSchedule(j) &&
         (j.delivery !== "manual" ||
           workerCapabilities.includes("manual-stage")) &&
         Object.values(j.results).some((r) => r.state === "queued"),
@@ -160,10 +251,7 @@ export async function startBridge({
       "Access-Control-Allow-Headers",
       "Authorization, Content-Type",
     );
-    res.setHeader(
-      "Access-Control-Allow-Methods",
-      "GET, POST, DELETE, OPTIONS",
-    );
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Max-Age", "600");
     res.setHeader("Vary", "Origin");
   }
@@ -197,18 +285,40 @@ export async function startBridge({
         return reply(res, 200, {
           ok: true,
           connected: Boolean(worker),
+          nativeVideoSchedule:
+            Boolean(worker) &&
+            workerCapabilities.includes(NATIVE_SCHEDULE_CAPABILITY),
+          nativeBilibiliSchedule:
+            Boolean(worker) &&
+            workerCapabilities.includes(PLATFORMS.bilibili.schedule.capability),
           pending: [...jobs.values()].filter((j) => !done(j)).length,
         });
       if (!equal(req.headers.authorization || "", "Bearer " + config.token))
         return reply(res, 401, { error: "Unauthorized" });
       if (req.method === "GET" && url.pathname === "/jobs")
         return reply(res, 200, { jobs: [...jobs.values()].map(view) });
+      if (req.method === "GET" && url.pathname === "/video-fingerprints") {
+        const entries = [];
+        for (const j of jobs.values()) {
+          if (j.kind !== "video") continue;
+          const asset = j.assets.find((a) => a.role === "video");
+          if (!asset) continue;
+          const sha256 = await assetFingerprint(asset);
+          if (sha256) entries.push([j.id, asset.id, sha256]);
+        }
+        return reply(res, 200, { fingerprints: entries });
+      }
       if (req.method === "POST" && url.pathname === "/jobs") {
         const incoming = await body(req);
         const task = validateTask(incoming);
         if (!/^[\w-]{1,100}$/.test(task.id)) throw new Error("任务 ID 无效");
         if (jobs.has(task.id)) {
           const existing = jobs.get(task.id);
+          if (
+            (existing.schedule || task.schedule) &&
+            JSON.stringify(existing.schedule) !== JSON.stringify(task.schedule)
+          )
+            return reply(res, 409, { error: "任务 ID 已绑定不同的定时参数" });
           if (
             (existing.kind === "x_reply" || task.kind === "x_reply") &&
             (existing.kind !== task.kind ||
@@ -225,14 +335,43 @@ export async function startBridge({
           if (!st.isFile() || st.size !== a.size)
             throw new Error("素材已变化或不是文件：" + a.name);
           a.mtimeMs = st.mtimeMs;
+          // Only the bridge may attach a verified hash to a local source.
+          delete a.sha256;
+          if (task.kind === "video") {
+            a.sha256 = await assetFingerprint(a);
+            if (!a.sha256) throw new Error("素材读取时发生变化：" + a.name);
+          }
         }
         if (task.kind === "article")
           task.prepared = renderArticle(task.markdown, task.assets, DOMParser);
-        const j = { ...task, results: initialResults(task) };
-        jobs.set(j.id, j);
-        await save(j);
-        reply(res, 201, view(j));
-        dispatch().catch(() => {});
+        await lock(async () => {
+          // Recheck after reading the files to make concurrent submissions idempotent.
+          const existing = jobs.get(task.id);
+          if (existing) {
+            if (
+              JSON.stringify(existing.schedule) !==
+                JSON.stringify(task.schedule) ||
+              existing.kind !== task.kind ||
+              (task.kind === "x_reply" &&
+                (existing.targetUrl !== task.targetUrl ||
+                  existing.description !== task.description))
+            )
+              return reply(res, 409, {
+                error: "任务 ID 已绑定另一份内容或定时参数",
+              });
+            return reply(res, 200, view(existing));
+          }
+          const duplicate =
+            task.kind === "video" && incoming.deduplicate === true
+              ? await identicalVideoTask(task)
+              : null;
+          if (duplicate) return reply(res, 200, view(duplicate));
+          const j = { ...task, results: initialResults(task) };
+          await save(j);
+          jobs.set(j.id, j);
+          reply(res, 201, view(j));
+          dispatch().catch(() => {});
+        });
         return;
       }
       const match =
@@ -405,11 +544,22 @@ export async function startBridge({
               (j.kind === "x_reply" && m.result?.state === "draft_ready")
             )
               throw new Error("任务类型与结果不匹配");
+            if (
+              ["schedule_ready", "scheduled"].includes(m.result?.state) &&
+              (!j.schedule ||
+                m.result.scheduledAt !== j.schedule.at ||
+                (m.result.state === "scheduled" && !j.schedule.submit))
+            )
+              throw new Error("定时结果与任务授权不匹配");
             if (TERMINAL.has(m.result?.state)) validateResult(m.result);
             else if (
-              !["opening", "uploading", "filling", "saving"].includes(
-                m.result?.state,
-              )
+              ![
+                "opening",
+                "uploading",
+                "filling",
+                "saving",
+                "submitting",
+              ].includes(m.result?.state)
             )
               throw new Error("Unexpected state");
             j.results[m.platform] = {
@@ -438,12 +588,7 @@ export async function startBridge({
       active = null;
       if (id) {
         const j = jobs.get(id);
-        for (const r of Object.values(j.results))
-          if (!TERMINAL.has(r.state) && r.state !== "queued")
-            Object.assign(r, {
-              state: "needs_attention",
-              message: "浏览器连接中断，请先检查平台草稿，避免重复创建",
-            });
+        for (const r of Object.values(j.results)) recover(r);
         for (const r of Object.values(j.results))
           if (r.state === "queued")
             Object.assign(r, {

@@ -256,6 +256,46 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
   assert.equal(injected[0].target.tabId, 42);
   assert.equal(messages[0].id, 42);
   assert.equal(messages[0].m.task.fillOnly, true);
+  for (const [id, result] of [
+    [
+      "filled",
+      {
+        state: "schedule_ready",
+        scheduledAt: "2035-11-20T07:00:00+08:00",
+        evidence: "定时已显示",
+      },
+    ],
+    [
+      "partial",
+      {
+        state: "needs_attention",
+        scheduledAt: "2035-11-20T07:00:00+08:00",
+        evidence: "定时已显示",
+      },
+    ],
+    ["unknown", { state: "schedule_unconfirmed" }],
+  ]) {
+    jobs.set(id, {
+      ...task(),
+      id,
+      platforms: ["xiaohongshu"],
+      schedule: {
+        at: "2035-11-20T07:00:00+08:00",
+        collection: "",
+        submit: false,
+      },
+      results: { xiaohongshu: result },
+    });
+    pageUrl = "https://creator.xiaohongshu.com/publish/publish";
+    for (const type of ["RUN_PLATFORM", "FILL_CURRENT", "RETRY"]) {
+      assert.equal(
+        (await send({ type, id, platform: "xiaohongshu", tabId: 42 })).ok,
+        false,
+      );
+    }
+    assert.equal(created.length, 0);
+    assert.deepEqual(jobs.get(id).results.xiaohongshu, result);
+  }
   await clicked({ id: 7, url: "https://example.com/" });
   assert.match(created[0].url, /workbench\.html$/);
   assert.doesNotMatch(created[0].url, /targetTab/);

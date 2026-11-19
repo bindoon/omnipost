@@ -3,19 +3,27 @@ import {
   validateTask,
   initialResults,
   retryable,
+  scheduleNeedsReview,
   canFillCurrent,
   TERMINAL,
   platformsFor,
   isAssist,
   X_REPLY_ENABLED,
   shownMessage,
+  groupVideoTasks,
+  validSha256,
+  videoFingerprintKey,
 } from "./shared/model.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { put, get } from "./shared/storage.js";
 import { extractTitle, renderArticle, imagePaths } from "./shared/content.js";
 import { copyWechatArticle, copyArticleTitle } from "./shared/clipboard.js";
 const extension = Boolean(globalThis.chrome?.runtime?.id);
 const app = document.querySelector("#app");
 const urls = new Map();
+const videoFingerprints = new Map();
+let fingerprintRequestKey = "";
 let jobs = [],
   error = "",
   bridge = { connected: false };
@@ -35,7 +43,7 @@ function currentView() {
       ? choices
           .map(
             (j) =>
-              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong>${j.published?.[p] ? `<span class="pill success">已发布</span>` : ""}<p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${currentTarget.role !== "editor" || !canFillCurrent(p, j.results[p]?.state, j.kind) ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
+              `<div class="job-card"><strong>${esc(j.overrides?.[p]?.title || j.title)}</strong>${j.published?.[p] ? `<span class="pill success">已发布</span>` : ""}<p>${esc(j.results[p]?.message || "等待处理")}</p><button class="primary" data-fill-current="${esc(j.id)}" ${currentTarget.role !== "editor" || !canFillCurrent(p, j.results[p], j.kind) ? "disabled" : ""}>填入原页面</button><div class="job-actions">${j.assets
                 .filter((a) => a.role.startsWith("cover"))
                 .map(
                   (a) =>
@@ -199,21 +207,57 @@ const shortLabels = {
   uploading: "上传中",
   filling: "填写中",
   saving: "保存中",
+  submitting: "提交定时中",
   draft_ready: "草稿已存",
+  schedule_ready: "定时已写入",
+  scheduled: "定时已提交",
+  schedule_unconfirmed: "待核对提交结果",
   needs_attention: "待处理",
   failed: "未完成",
   review_ready: "待审阅",
 };
-function contentCard(j) {
-  const ids = [
-    ...j.platforms,
-    ...platformsFor(j.kind).filter((id) => !j.platforms.includes(id)),
+function platformTask(variants, platform) {
+  const resultPriority = [
+    "scheduled",
+    "schedule_unconfirmed",
+    "submitting",
+    "schedule_ready",
+    "draft_ready",
+    "saving",
+    "filling",
+    "uploading",
+    "opening",
   ];
-  const publishedIds = Object.keys(j.published || {}).filter(
-    (id) => j.published[id] && PLATFORMS[id],
+  return (
+    variants.find((v) => v.published?.[platform]) ||
+    resultPriority
+      .map((state) =>
+        variants.find((v) => v.results?.[platform]?.state === state),
+      )
+      .find(Boolean) ||
+    variants.find((v) => v.platforms.includes(platform)) ||
+    variants[0]
+  );
+}
+function scheduleLabel(schedule) {
+  return schedule?.at
+    ? `定时 ${schedule.at.slice(0, 16).replace("T", " ")}`
+    : "";
+}
+function contentCard(j, variants = [j], nested = false) {
+  const requested = [...new Set(variants.flatMap((v) => v.platforms))];
+  const ids = [
+    ...requested,
+    ...(!nested
+      ? platformsFor(j.kind).filter((id) => !requested.includes(id))
+      : []),
+  ];
+  const publishedIds = ids.filter((id) =>
+    variants.some((v) => v.published?.[id]),
   );
   const rows = ids
     .map((p) => {
+      const j = platformTask(variants, p);
       const included = j.platforms.includes(p);
       const r = included
         ? j.results?.[p] || { state: "queued", message: "等待推送" }
@@ -224,18 +268,33 @@ function contentCard(j) {
               : "尚未写入草稿",
           };
       const published = Boolean(j.published?.[p]);
-      const done = r.state === "draft_ready";
-      const attention = ["needs_attention", "failed"].includes(r.state);
-      const busy = ["opening", "uploading", "filling", "saving"].includes(
+      const done = ["draft_ready", "schedule_ready", "scheduled"].includes(
         r.state,
       );
-      const action = done
-        ? `<button class="quiet" data-sync="open" data-job="${esc(j.id)}" data-platform="${p}">打开草稿</button>`
-        : isAssist(p)
-          ? `<button class="quiet" data-sync="goto" data-job="${esc(j.id)}" data-platform="${p}">打开发布页</button>`
-          : busy
-            ? ""
-            : `<button class="primary" data-sync="run" data-job="${esc(j.id)}" data-platform="${p}">写入草稿</button>`;
+      const attention = [
+        "needs_attention",
+        "failed",
+        "schedule_unconfirmed",
+      ].includes(r.state);
+      const busy = [
+        "opening",
+        "uploading",
+        "filling",
+        "saving",
+        "submitting",
+      ].includes(r.state);
+      const action =
+        r.state === "scheduled" ||
+        r.state === "schedule_unconfirmed" ||
+        (variants.length > 1 && published)
+          ? ""
+          : done || (r.state === "needs_attention" && scheduleNeedsReview(r))
+            ? `<button class="quiet" data-sync="open" data-job="${esc(j.id)}" data-platform="${p}">${r.scheduledAt ? "打开定时编辑页" : "打开草稿"}</button>`
+            : isAssist(p)
+              ? `<button class="quiet" data-sync="goto" data-job="${esc(j.id)}" data-platform="${p}">打开发布页</button>`
+              : busy
+                ? ""
+                : `<button class="primary" data-sync="run" data-job="${esc(j.id)}" data-platform="${p}">写入草稿</button>`;
       const detail = notableMessage(r);
       const day = published ? formatDay(j.published[p]) : "";
       const likes = published ? formatLikes(j.checks?.[p]?.likes) : "";
@@ -249,7 +308,9 @@ function contentCard(j) {
   const controls =
     j.kind === "article"
       ? `${articleCopyButtons(j.id)}<div class="platform-sync">${rows}</div>`
-      : `<div class="video-card-layout"><div class="video-stage" data-preview-for="${esc(j.id)}"></div><div class="platform-sync" aria-label="平台操作">${rows}</div></div>`;
+      : nested
+        ? `<div class="platform-sync">${rows}</div>`
+        : `<div class="video-card-layout"><div class="video-stage" data-preview-for="${esc(j.id)}"></div><div class="platform-sync" aria-label="平台操作">${rows}</div></div>`;
   const body =
     j.kind === "article"
       ? `<div class="article-card-layout"><div class="article-controls">${controls}</div><aside class="article-preview" aria-label="文章预览"><div class="article-preview-label">文章预览 <span>公众号排版</span></div><div class="phone"><div class="phone-bar"><span>‹</span><strong>微信公众号</strong><span>•••</span></div><div class="phone-content" data-article-preview="${esc(j.id)}" tabindex="0" role="region" aria-label="文章正文预览"></div></div><p class="preview-foot">可滚动查看全文 · 最终样式以平台编辑器为准</p></aside></div>`
@@ -257,14 +318,31 @@ function contentCard(j) {
   const summary = publishedIds.length
     ? `<p class="publish-line">已发布 ${publishedIds.map((id) => `<b>${esc(PLATFORMS[id].short)}</b>`).join(" ")}</p>`
     : "";
-  return `<article class="content-card"><div class="card-head"><div class="card-title"><h2>${esc(j.title)}</h2><p class="saved">${j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : ""}</p>${summary}${checkLine(j)}</div><div class="card-actions"><button class="quiet" data-check="${esc(j.id)}">核对已发</button><button class="quiet" data-history="${esc(j.id)}">查看内容</button><button class="quiet danger" data-delete="${esc(j.id)}">删除</button></div></div>${body}</article>`;
+  const tasks =
+    variants.length > 1
+      ? `<details class="history-list"><summary>同一视频的 ${variants.length} 个任务</summary>${variants.map((entry) => contentCard(entry, [entry], true)).join("")}</details>`
+      : "";
+  const deleteButton =
+    variants.length === 1
+      ? `<button class="quiet danger" data-delete="${esc(j.id)}">删除</button>`
+      : "";
+  const titleTag = nested ? "h3" : "h2";
+  const stamp = [
+    j.createdAt ? new Date(j.createdAt).toLocaleString("zh-CN") : "",
+    ...(nested ? [scheduleLabel(j.schedule), j.id] : []),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<article class="${nested ? "job-card" : "content-card"}"><div class="card-head"><div class="card-title"><${titleTag}>${esc(j.title)}</${titleTag}><p class="saved">${esc(stamp)}</p>${summary}${checkLine(j)}</div><div class="card-actions"><button class="quiet" data-check="${esc(j.id)}">核对已发</button><button class="quiet" data-history="${esc(j.id)}">查看内容</button>${deleteButton}</div></div>${body}${tasks}</article>`;
 }
 function libraryMain() {
   const kind = state.libraryKind === "article" ? "article" : "video";
   const list = jobs.filter((j) => j.kind === kind);
   return `<main class="library ${kind === "article" ? "library-articles" : "library-videos"}">${currentView()}<div class="library-head"><div class="segmented" role="tablist" aria-label="内容类型"><button role="tab" data-library="video" aria-selected="${kind === "video"}" class="${kind === "video" ? "active" : ""}">视频</button><button role="tab" data-library="article" aria-selected="${kind === "article"}" class="${kind === "article" ? "active" : ""}">文章</button></div><button class="primary" data-action="compose">导入新内容</button></div>${
     list.length
-      ? list.map(contentCard).join("")
+      ? groupVideoTasks(list, videoFingerprints)
+          .map((group) => contentCard(group[0], group))
+          .join("")
       : `<p class="library-empty">${kind === "video" ? "还没有视频。" : "还没有文章。"}导入一份，或让 AI 交接到这里。每条内容下面是各平台的同步状态。</p>`
   }${repliesSection()}</main>`;
 }
@@ -314,6 +392,10 @@ const labels = {
   filling: "填写内容",
   saving: "保存中",
   draft_ready: "草稿已保存",
+  submitting: "提交定时中",
+  schedule_ready: "定时已写入",
+  scheduled: "定时已提交",
+  schedule_unconfirmed: "待核对提交结果",
   needs_attention: "需要处理",
   failed: "未完成",
 };
@@ -483,6 +565,21 @@ async function chooseArticle(files) {
     dialog.showModal();
   });
 }
+async function hashVideo(file) {
+  const hash = sha256.create();
+  const reader = file.stream().getReader();
+  try {
+    for (
+      let chunk = await reader.read();
+      !chunk.done;
+      chunk = await reader.read()
+    )
+      hash.update(chunk.value);
+    return bytesToHex(hash.digest());
+  } finally {
+    reader.releaseLock();
+  }
+}
 async function importFiles(files) {
   error = "";
   try {
@@ -524,10 +621,21 @@ async function importFiles(files) {
         state.platforms = platformsFor("video");
       }
       const previous = state.assets.find((a) => a.path === path);
-      const id = previous?.id || crypto.randomUUID();
-      const a = { id, name: f.name, path, size: f.size, type: f.type, role };
+      const fingerprint = role === "video" ? await hashVideo(f) : null;
+      const reusable =
+        previous && (!fingerprint || previous.sha256 === fingerprint);
+      const id = reusable ? previous.id : crypto.randomUUID();
+      const a = {
+        id,
+        name: f.name,
+        path,
+        size: f.size,
+        type: f.type,
+        role,
+        ...(fingerprint ? { sha256: fingerprint } : {}),
+      };
       await put("assets", f, id);
-      state.assets = state.assets.filter((a) => a.id !== id);
+      state.assets = state.assets.filter((a) => a.id !== previous?.id);
       if (role === "video")
         state.assets = state.assets.filter((a) => a.role !== "video");
       state.assets.push(a);
@@ -1034,6 +1142,43 @@ async function hydrate() {
     } catch {}
   }
 }
+function refreshVideoFingerprints() {
+  if (!bridge.connected) {
+    fingerprintRequestKey = "";
+    return;
+  }
+  const missing = jobs.flatMap((job) => {
+    const video =
+      job.bridgeJob &&
+      job.kind === "video" &&
+      job.assets?.find((asset) => asset.role === "video");
+    if (!video || validSha256(video.sha256)) return [];
+    const key = videoFingerprintKey(job, video);
+    return videoFingerprints.has(key) ? [] : [key];
+  });
+  const key = missing.join("\n");
+  if (!key || key === fingerprintRequestKey) return;
+  fingerprintRequestKey = key;
+  const requested = new Set(missing);
+  send("VIDEO_FINGERPRINTS")
+    .then((result) => {
+      let changed = false;
+      for (const [jobId, assetId, sha] of result.fingerprints || []) {
+        const name = videoFingerprintKey({ id: jobId }, { id: assetId });
+        if (!requested.has(name) || !validSha256(sha)) continue;
+        videoFingerprints.set(name, sha);
+        changed = true;
+      }
+      if (
+        changed &&
+        state.screen === "library" &&
+        state.libraryKind === "video"
+      )
+        render();
+    })
+    // Older bridges and unavailable legacy source files keep their separate cards.
+    .catch(() => {});
+}
 async function refresh() {
   if (!extension) return;
   try {
@@ -1043,6 +1188,7 @@ async function refresh() {
     const previousJobIds = jobs.map((j) => j.id).join("\n");
     jobs = r.jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     bridge = r.bridge;
+    refreshVideoFingerprints();
     const previousStep = state.step;
     if (
       state.jobId &&
@@ -1120,6 +1266,7 @@ async function init() {
             if (!changed) return;
             const label = document.querySelector(".connection");
             if (label) label.innerHTML = connectionMarkup();
+            refreshVideoFingerprints();
           })
           .catch(() => {});
       }, 3000);

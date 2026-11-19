@@ -4,6 +4,10 @@ import fs from "node:fs/promises";
 import vm from "node:vm";
 import * as model from "../extension/shared/model.js";
 import * as target from "../extension/shared/target.js";
+import {
+  NATIVE_SCHEDULE_CAPABILITY,
+  PLATFORM_SCHEDULE_CAPABILITIES,
+} from "../extension/shared/platforms/index.js";
 
 const token = "ab".repeat(32);
 
@@ -66,6 +70,8 @@ test("保存过令牌后会自动连接，空令牌也能再次连接", async (t
   vm.runInNewContext(source, {
     ...model,
     ...target,
+    NATIVE_SCHEDULE_CAPABILITY,
+    PLATFORM_SCHEDULE_CAPABILITIES,
     chrome: {
       runtime: {
         id: "ext",
@@ -121,6 +127,12 @@ test("保存过令牌后会自动连接，空令牌也能再次连接", async (t
     await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sent[0]?.type, "hello");
   assert.equal(sent[0].token, token);
+  assert.ok(sent[0].capabilities.includes(NATIVE_SCHEDULE_CAPABILITY));
+  assert.ok(
+    PLATFORM_SCHEDULE_CAPABILITIES.every((value) =>
+      sent[0].capabilities.includes(value),
+    ),
+  );
   const state = await send({ type: "STATE" });
   assert.equal(state.ok, true);
   assert.equal(state.bridge.connected, true);

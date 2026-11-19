@@ -47,9 +47,9 @@ function blockReason(job) {
   } catch (error) {
     return error.message;
   }
-  const state = job.results?.[target.platform]?.state;
-  if (!canFillCurrent(target.platform, state, job.kind))
-    return job.results[target.platform].message || "已有处理记录，请先检查页面";
+  const result = job.results?.[target.platform];
+  if (!canFillCurrent(target.platform, result, job.kind))
+    return result.message || "已有处理记录，请先检查页面";
   return "";
 }
 function coverAsset(job) {
@@ -111,7 +111,7 @@ function reasonHtml(job, reason) {
   return `<p class="error mt-3 rounded-xl bg-orange-50 px-3 py-2.5 text-[13px] leading-6 text-orange-950">${esc(reason)}</p>`;
 }
 function fillButton(job) {
-  return `<button type="button" class="mt-3 h-11 w-full rounded-xl bg-brand text-sm font-medium text-white hover:bg-brand-dark" data-fill="${esc(job.id)}">填入这个页面</button>`;
+  return `<button type="button" class="mt-3 h-11 w-full rounded-xl bg-brand text-sm font-medium text-white hover:bg-brand-dark" data-fill="${esc(job.id)}">${job.schedule ? "填入素材和定时" : "填入这个页面"}</button>`;
 }
 function videoCard(job) {
   const reason = blockReason(job);

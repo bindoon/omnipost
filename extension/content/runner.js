@@ -1,16 +1,13 @@
+import {
+  PLATFORMS,
+  scheduleWindowIssue,
+  tagNames,
+  topicNames as hashTopics,
+} from "../shared/model.js";
+
 (() => {
   if (globalThis.__OMNIPOST__) return;
   globalThis.__OMNIPOST__ = true;
-  const origins = {
-    wechat: "https://mp.weixin.qq.com",
-    xiaohongshu: "https://creator.xiaohongshu.com",
-    x: "https://x.com",
-    channels: "https://channels.weixin.qq.com",
-    douyin: "https://creator.douyin.com",
-    bilibili: "https://member.bilibili.com",
-    youtube: "https://studio.youtube.com",
-    instagram: "https://www.instagram.com",
-  };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const norm = (s) =>
     String(s || "")
@@ -127,7 +124,9 @@
     if (!el) return "";
     const text = el.matches("input,textarea") ? el.value : plainText(el);
     const placeholder =
-      el.getAttribute("data-placeholder") || el.getAttribute("placeholder") || "";
+      el.getAttribute("data-placeholder") ||
+      el.getAttribute("placeholder") ||
+      "";
     return norm(text) && norm(text) !== norm(placeholder) ? text : "";
   }
   function isEditable(el) {
@@ -167,7 +166,26 @@
       }
     } catch {}
   }
-  async function fillEditable(el, value) {
+  async function pasteEditorText(el, value) {
+    if (
+      typeof ClipboardEvent !== "function" ||
+      typeof DataTransfer !== "function"
+    )
+      return false;
+    placeCaret(el);
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", value);
+    el.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      }),
+    );
+    await sleep(100);
+    return acceptedEditor(el, value);
+  }
+  async function fillEditable(el, value, { pasteFirst = false } = {}) {
     if (!el) return;
     if (el.matches("input,textarea")) {
       textField(el, value);
@@ -175,26 +193,12 @@
     }
     el.focus();
     pointerClick(el);
+    if (pasteFirst && (await pasteEditorText(el, value))) return;
     insertEditorText(el, value);
     if (acceptedEditor(el, value)) return;
     await sleep(40);
     if (acceptedEditor(el, value)) return;
-    if (
-      typeof ClipboardEvent === "function" &&
-      typeof DataTransfer === "function"
-    ) {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", value);
-      el.dispatchEvent(
-        new ClipboardEvent("paste", {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dt,
-        }),
-      );
-      await sleep(40);
-      if (acceptedEditor(el, value)) return;
-    }
+    if (!pasteFirst && (await pasteEditorText(el, value))) return;
     textField(el, value);
   }
   function acceptedEditor(el, value) {
@@ -412,12 +416,8 @@
     const dt = new DataTransfer();
     dt.items.add(f);
     input.files = dt.files;
-    input.dispatchEvent(
-      new Event("input", { bubbles: true, composed: true }),
-    );
-    input.dispatchEvent(
-      new Event("change", { bubbles: true, composed: true }),
-    );
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
   }
   function shadowRootOf(el) {
     if (!el || el.nodeType !== 1) return null;
@@ -501,7 +501,7 @@
     return queryAll(selector).find(visible);
   }
   async function status(task, state, message) {
-    await chrome.runtime.sendMessage({
+    return chrome.runtime.sendMessage({
       type: "CONTENT_STATUS",
       id: task.id,
       platform: task.platform,
@@ -516,25 +516,12 @@
   function withNotes(task, message) {
     return [message, ...(task._notes || [])].filter(Boolean).join("；");
   }
-  function hashTopics(text) {
-    const names = [];
-    for (const match of String(text || "").matchAll(/#([^\s#]+)/g))
-      if (!names.includes(match[1])) names.push(match[1]);
-    return names;
-  }
   function withTopicSpaces(text) {
     return String(text || "").replace(/#([^\s#]+)(?![ \t])/g, "#$1 ");
   }
   function tagList(task) {
     return [
-      ...new Set(
-        [
-          ...String(task.tags || "")
-            .split(/[,，\s]+/)
-            .filter(Boolean),
-          ...hashTopics(task.description),
-        ].filter(Boolean),
-      ),
+      ...new Set([...tagNames(task.tags), ...hashTopics(task.description)]),
     ];
   }
   function pointerClick(el) {
@@ -578,9 +565,9 @@
   }
   async function confirmTopics(task, editor) {
     const names = hashTopics(task.description || "");
-    if (!names.length || !["xiaohongshu", "douyin"].includes(task.platform))
-      return;
-    const cap = task.platform === "douyin" ? 5 : names.length;
+    const rules = PLATFORMS[task.platform].copy.video;
+    if (!names.length || !rules?.nativeTopics) return;
+    const cap = rules.topicMax ?? names.length;
     for (const name of names.slice(0, cap)) {
       if (hasTopic(editor, name)) continue;
       const option = findSuggestion(name);
@@ -594,7 +581,8 @@
           "话题「" + name + "」没有变成平台话题，请在页面点选同名联想",
         );
     }
-    if (names.length > cap) note(task, "抖音只处理前 5 个话题");
+    if (names.length > cap)
+      note(task, PLATFORMS[task.platform].name + "只处理前 " + cap + " 个话题");
   }
   async function waitUploadIdle() {
     const busy = () => /上传中|正在上传|转码中/.test(document.body.innerText);
@@ -1219,13 +1207,10 @@
         ["上传封面", "上传图片", "选择图片", "本地上传"],
         dialog || document,
       );
-      if (!button) throw new Error("请先在页面上打开封面编辑，再点「用这张做封面」");
+      if (!button)
+        throw new Error("请先在页面上打开封面编辑，再点「用这张做封面」");
       click(button);
-      input = await wait(
-        () => coverFileInput(),
-        "未找到封面文件选择框",
-        4000,
-      );
+      input = await wait(() => coverFileInput(), "未找到封面文件选择框", 4000);
     }
     await upload(input, image);
   }
@@ -1235,7 +1220,9 @@
         if (!visible(el)) return false;
         const text = norm(el.textContent);
         return (
-          text.length < 1500 && /上传/.test(text) && /完成|确认|确定/.test(text)
+          text.length < 1500 &&
+          (/上传/.test(text) || (/设置封面/.test(text) && /裁剪/.test(text))) &&
+          /完成|确认|确定/.test(text)
         );
       })
       .sort(
@@ -1252,24 +1239,39 @@
       8000,
     );
     let input = inputFor("image", dialog);
+    if (!input && task.platform === "xiaohongshu") input = coverFileInput();
     if (!input) {
       const button = controlByText(
-        ["上传封面", "上传图片", "本地上传", "上传"],
+        ["上传封面", "上传封面图片", "上传图片", "本地上传", "上传"],
         dialog,
       );
       if (!button) attention("封面窗口里没有上传按钮");
       click(button);
       input = await wait(
-        () => inputFor("image", coverDialog() || dialog),
+        () =>
+          inputFor("image", coverDialog() || dialog) ||
+          (task.platform === "xiaohongshu" && coverFileInput()),
         "未找到封面文件选择框",
         8000,
       );
     }
     await upload(input, await file(task, asset));
-    await sleep(400);
+    await sleep(task.platform === "douyin" ? 1200 : 400);
     const openDialog = () => coverDialog() || dialog;
     if (ratios.length) {
-      const ratio = exact(ratios, openDialog()) || exact(ratios);
+      let ratio = exact(ratios, openDialog()) || exact(ratios);
+      if (!ratio && task.platform === "xiaohongshu") {
+        const crop =
+          controlByText("裁剪", openDialog()) || controlByText("裁剪");
+        if (crop) {
+          click(crop);
+          ratio = await wait(
+            () => exact(ratios, openDialog()) || exact(ratios),
+            "封面裁剪面板未提供比例「" + ratios[0] + "」",
+            4000,
+          );
+        }
+      }
       if (!ratio)
         note(task, "未找到封面比例「" + ratios[0] + "」，请在平台确认裁切");
       else {
@@ -1288,29 +1290,195 @@
       }
     }
     if (keepOpen) return;
-    const done = controlByText(
-      ["完成", "确认", "确定"],
-      coverDialog() || dialog,
+    await finishCoverDialog(task, dialog);
+  }
+  async function finishCoverDialog(task, dialog) {
+    const openDialog = () => coverDialog() || dialog;
+    const done = await wait(
+      () => {
+        const enabled = (control) =>
+          control &&
+          !control.disabled &&
+          control.getAttribute("aria-disabled") !== "true";
+        const control = controlByText(["完成", "确认", "确定"], openDialog());
+        if (enabled(control)) return control;
+        if (task.platform === "xiaohongshu" && controlByText("裁剪")) {
+          const candidates = exactLeaves(document, "完成")
+            .map((el) => el.closest('button,[role="button"]') || el)
+            .filter(enabled);
+          if (candidates.length === 1) return candidates[0];
+        }
+        return null;
+      },
+      "封面已选择，但窗口里的确认按钮仍不可用",
+      8000,
     );
-    if (!done) attention("封面已选择，但窗口里没有确认按钮");
     click(done);
+    if (task.platform === "douyin") {
+      await sleep(1200);
+      const current = coverDialog();
+      const confirm = current && controlByText("完成", current);
+      if (
+        confirm &&
+        !confirm.disabled &&
+        confirm.getAttribute("aria-disabled") !== "true"
+      )
+        click(confirm);
+    }
     await wait(
-      () => !coverDialog(),
+      () => !done.isConnected || !visible(done) || !coverDialog(),
       "封面窗口没有关闭，请在页面上确认封面",
       8000,
     );
   }
+  function bilibiliCoverNeedsSyncReview() {
+    return (
+      /检测到个人空间封面[（(]16[:：]9[）)]未修改/.test(
+        compact(document.body.innerText),
+      ) &&
+      ["不同步，手动编辑", "确认同步"].every(
+        (label) => exactLeaves(document, label).length,
+      )
+    );
+  }
+  async function uploadBilibiliCoverDialog(task, asset) {
+    const editor = await wait(
+      () =>
+        field(".cover-editor") ||
+        queryAll('[role="dialog"]').find(
+          (dialog) =>
+            visible(dialog) && /上传封面|上传图片/.test(dialog.textContent),
+        ),
+      "B 站封面编辑窗口没有打开",
+      8000,
+    );
+    if (!editor.matches(".cover-editor")) {
+      await uploadCoverDialog(task, asset);
+      return true;
+    }
+
+    const image = await file(task, asset);
+    if (bilibiliCoverNeedsSyncReview()) return false;
+    if (task.schedule && asset.role === "cover-landscape") {
+      const syncLabel = () => {
+        const wrappers = queryAll(".sync-checkbox-wrapper", editor).filter(
+          (wrapper) =>
+            visible(wrapper) && norm(wrapper.textContent) === "双比例同步改动",
+        );
+        if (wrappers.length !== 1) return null;
+        const labels = queryAll("label", wrappers[0]).filter(visible);
+        return labels.length === 1 ? labels[0] : null;
+      };
+      const checkbox = syncLabel();
+      if (
+        checkbox &&
+        !checkbox.classList.contains("bcc-checkbox-checked") &&
+        !checkbox.classList.contains("bcc-checkbox-disabled") &&
+        !checkbox.querySelector("input:disabled")
+      ) {
+        click(checkbox);
+        await wait(
+          () => syncLabel()?.classList.contains("bcc-checkbox-checked"),
+          "B 站未确认启用双比例同步改动，请核对封面",
+          4000,
+        );
+      }
+    }
+    const input = await wait(
+      () =>
+        editor.querySelector(
+          '.cover-upload input[type="file"][accept*="image"]',
+        ),
+      "未找到 B 站封面文件选择框",
+      8000,
+    );
+    const preview = () =>
+      editor.querySelector(".cover-upload .upload-area.has-image")?.style
+        .backgroundImage;
+    const previous = preview();
+    await upload(input, image);
+    await wait(
+      () => {
+        const current = preview();
+        return current !== previous && /blob:|data:image\//.test(current || "");
+      },
+      "B 站没有显示刚选中的本地封面",
+      8000,
+    );
+
+    const done = await wait(
+      () => {
+        const button = field(".cover-editor-button .button.submit", editor);
+        return norm(button?.textContent) === "完成" &&
+          !button.disabled &&
+          button.getAttribute("aria-disabled") !== "true"
+          ? button
+          : null;
+      },
+      "B 站封面的完成按钮不可用",
+      8000,
+    );
+    click(done);
+    const outcome = await wait(
+      () => {
+        if (bilibiliCoverNeedsSyncReview()) return "review";
+        if (
+          !field(".cover-editor") &&
+          field(".cover-img") &&
+          !field(".cover-empty")
+        )
+          return "saved";
+        return null;
+      },
+      "B 站没有确认保留封面，请核对当前投稿页",
+      10000,
+    );
+    return outcome === "saved";
+  }
   async function uploadChosenCover(task, openers, ratios = []) {
-    const asset = coverFile(task, [
-      "cover-portrait",
-      "cover",
-      "cover-landscape",
-    ]);
+    const asset = coverFile(
+      task,
+      task.platform === "bilibili"
+        ? ["cover-landscape", "cover", "cover-portrait"]
+        : ["cover-portrait", "cover", "cover-landscape"],
+    );
     if (!asset) return false;
     await status(task, "filling", "上传封面");
-    const opener = controlByText(openers);
+    let opener = controlByText(openers);
+    if (task.platform === "bilibili")
+      opener = field(".cover-empty .add-text") || opener;
+    if (task.platform === "xiaohongshu" && task.kind === "video") {
+      // The actual edit control is overlaid on the preview and can be hidden
+      // until pointer hover. Avoid clicking the "设置封面" section heading.
+      let tile = queryAll('[style*="spectrum/"]').find(visible);
+      for (
+        let level = 0;
+        level < 4 && tile;
+        level++, tile = tile.parentElement
+      ) {
+        const edit = queryAll("button,[role=button],label,span,div", tile).find(
+          (el) => {
+            const label = norm(el.textContent);
+            return (
+              openers.includes(label) &&
+              (label !== "设置封面" ||
+                el.matches('button,[role="button"],label')) &&
+              !Array.from(el.children).some((child) =>
+                openers.includes(norm(child.textContent)),
+              )
+            );
+          },
+        );
+        if (edit) {
+          opener = edit.closest('button,[role="button"],label') || edit;
+          break;
+        }
+      }
+    }
     if (!opener) attention("未找到封面入口，请在页面上打开封面编辑");
     click(opener);
+    if (task.platform === "bilibili")
+      return uploadBilibiliCoverDialog(task, asset);
     await uploadCoverDialog(task, asset, ratios);
     return true;
   }
@@ -1355,6 +1523,25 @@
     }
     return count;
   }
+  function douyinCoverOpener(direction) {
+    const label = direction === "landscape" ? "横封面4:3" : "竖封面3:4";
+    const otherLabel = direction === "landscape" ? "竖封面3:4" : "横封面4:3";
+    for (const marker of exactLeaves(document, label)) {
+      const card = sectionOf(
+        marker.parentElement,
+        (element) =>
+          !compact(element.textContent).includes(otherLabel) &&
+          (controlByText(["选择封面", "编辑封面"], element) ||
+            queryAll("img", element).some(visible)),
+      );
+      if (card)
+        return (
+          controlByText(["选择封面", "编辑封面"], card) ||
+          queryAll("img", card).find(visible)
+        );
+    }
+    return null;
+  }
   async function uploadDouyinCovers(task) {
     const slots = [
       [["cover-landscape"], "设置横封面", ["4:3", "4：3"]],
@@ -1370,6 +1557,79 @@
       "封面编辑窗口没有打开",
       8000,
     );
+    const preview = () => {
+      const text = compact(document.body.innerText);
+      if (
+        text.includes("竖封面预览（3:4）") ||
+        text.includes("竖封面预览(3:4)")
+      )
+        return "portrait";
+      if (
+        text.includes("横封面预览（4:3）") ||
+        text.includes("横封面预览(4:3)")
+      )
+        return "landscape";
+      return null;
+    };
+    const firstPreview = preview();
+    if (firstPreview) {
+      const otherPreview =
+        firstPreview === "portrait" ? "landscape" : "portrait";
+      const assets = {
+        portrait: coverFile(task, ["cover-portrait", "cover"]),
+        landscape: coverFile(task, ["cover-landscape"]),
+      };
+      if (assets[firstPreview])
+        await uploadCoverDialog(
+          task,
+          assets[firstPreview],
+          [],
+          Boolean(assets[otherPreview]),
+        );
+      if (assets[otherPreview]) {
+        const label =
+          otherPreview === "landscape" ? "设置横封面" : "设置竖封面";
+        const directionButton = () =>
+          queryAll("button,[role=button]").find(
+            (element) =>
+              visible(element) && compact(element.textContent) === label,
+          );
+        if (directionButton()) {
+          // The footer switch commits the current direction before opening the other.
+          const switchCover = await wait(
+            () => {
+              const button = directionButton();
+              return button &&
+                !button.disabled &&
+                button.getAttribute("aria-disabled") !== "true"
+                ? button
+                : null;
+            },
+            "抖音未开放「" + label + "」",
+            12000,
+          );
+          click(switchCover);
+        } else {
+          // An existing preview can open a single-direction editor.
+          if (!assets[firstPreview])
+            attention("抖音打开了仅支持另一方向的封面窗口");
+          await finishCoverDialog(task, dialog);
+          const open = await wait(
+            () => douyinCoverOpener(otherPreview),
+            "未找到「" + label + "」卡片",
+            8000,
+          );
+          click(open);
+        }
+        await wait(
+          () => preview() === otherPreview,
+          "抖音未切换到目标封面，请核对保留的页面",
+          8000,
+        );
+        await uploadCoverDialog(task, assets[otherPreview]);
+      }
+      return true;
+    }
     const tabbed = slots.some(
       ([_, label]) => exact(label, dialog) || exact(label),
     );
@@ -1384,27 +1644,65 @@
       return true;
     }
     for (let index = 0; index < slots.length; index++) {
-      const [roles, label, ratios] = slots[index];
+      const [roles, label] = slots[index];
       const tab = exact(label, coverDialog() || dialog) || exact(label);
       if (tab) click(tab);
       await uploadCoverDialog(
         task,
         coverFile(task, roles),
-        ratios,
+        [],
         index < slots.length - 1,
       );
     }
     return true;
   }
+  function bilibiliVideoInput(video) {
+    const extension = /\.[^.]+$/.exec(video.name.toLowerCase())?.[0];
+    const types = new Set(
+      [extension, video.type.toLowerCase(), "video/*"].filter(Boolean),
+    );
+    const accepts = (input) =>
+      input.isConnected &&
+      !input.disabled &&
+      (input.getAttribute("accept") || "")
+        .toLowerCase()
+        .split(",")
+        .some((type) => types.has(type.trim()));
+    const primary = queryAll(
+      '.upload-wrp .bcc-upload-wrapper input[type="file"]',
+    ).filter(accepts);
+    if (primary.length === 1) return primary[0];
+    if (queryAll(".upload-wrp, .micro-app").some((node) => node.isConnected))
+      return null;
+    const alternatives = queryAll('input[type="file"]').filter(accepts);
+    return alternatives.length === 1 ? alternatives[0] : null;
+  }
+  function assertBilibiliUploadEmpty(input) {
+    const existing = field('input[placeholder*="稿件标题"]');
+    if (
+      editorText(existing) ||
+      input?.files?.length ||
+      /上传中|上传完成/.test(document.body.innerText)
+    )
+      attention("当前 B 站投稿页已有视频，请先核对该稿件，避免重复上传");
+  }
   async function bilibiliVideo(task) {
     auth();
+    assertBilibiliUploadEmpty();
     await status(task, "uploading", "上传视频素材");
     const asset = task.assets.find((item) => item.role === "video");
-    const input = await wait(
-      () => field(".bcc-upload-wrapper input[type=file]") || inputFor("video"),
-      "未找到 B 站视频上传控件",
-    );
-    await upload(input, await file(task, asset));
+    const video = await file(task, asset);
+    // The current upload form can mount again while the local file is read.
+    // Its real file input is hidden and the auxiliary app has a separate input.
+    const input = await wait(() => {
+      const candidate = bilibiliVideoInput(video);
+      assertBilibiliUploadEmpty(candidate);
+      return candidate;
+    }, "未找到 B 站视频上传控件");
+    assertBilibiliUploadEmpty(input);
+    if (!input.isConnected)
+      attention("B 站视频上传控件已变化，请核对当前投稿页");
+    await upload(input, video);
     const title = await wait(
       () => field('input[placeholder*="稿件标题"]'),
       "等待 B 站编辑表单超时",
@@ -1413,18 +1711,32 @@
     textField(title, task.title);
     const desc = field(".ql-editor");
     if (desc) textField(desc, task.description || "");
+    const copyMatches = () =>
+      editorText(title) === task.title &&
+      compact(editorText(desc)) === compact(task.description);
     for (const close of queryAll(
       ".tag-pre-wrp svg.close, .label-item-v2-container .close",
     ))
       if (visible(close)) click(close);
     const tags = tagList(task);
+    const tagMax = PLATFORMS.bilibili.copy.video.tagMax;
     const tagInput = field(
       'input[placeholder*="创建标签"],input[placeholder*="标签"]',
     );
     if (tagInput) {
-      for (const tag of tags.slice(0, 10)) {
+      for (const tag of tags.slice(0, tagMax)) {
         textField(tagInput, tag);
-        pressEnter(tagInput);
+        if (typeof KeyboardEvent === "function") {
+          const enter = {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            bubbles: true,
+          };
+          tagInput.dispatchEvent(new KeyboardEvent("keydown", enter));
+          if (tagInput.value === tag)
+            tagInput.dispatchEvent(new KeyboardEvent("keyup", enter));
+        } else pressEnter(tagInput);
         await sleep(100);
         const chip = queryAll(
           ".label-item-v2-container, .tag-pre-wrp span",
@@ -1436,11 +1748,45 @@
           );
       }
     } else if (tags.length) note(task, "未找到 B 站标签输入框");
+    await waitUploadIdle();
+    const uploads = queryAll(".task-list-content-item .task").filter(visible);
+    if (uploads.length > 1)
+      attention("当前 B 站稿件有多个视频，请核对分 P，避免重复投稿");
+    if (task.category) await chooseBilibiliCategory(task.category.trim());
+    const schedule = task.schedule
+      ? await configureBilibiliSchedule(task, copyMatches)
+      : null;
     const covered = await uploadChosenCover(task, [
       "更换封面",
+      "添加封面",
       "上传封面",
-      "封面",
     ]);
+    if (!covered && bilibiliCoverNeedsSyncReview())
+      return {
+        ...schedule,
+        state: "needs_attention",
+        persisted: false,
+        editorUrl: location.href,
+        message: withNotes(
+          task,
+          [schedule?.evidence, "请在同步弹窗中核对 16:9 个人空间封面"]
+            .filter(Boolean)
+            .join("；"),
+        ),
+        warnings: task._notes,
+      };
+    if (schedule) {
+      if (!covered || !bilibiliScheduleMatches(task, copyMatches))
+        attention("B 站封面、定时或文案还待核对，请检查原页面");
+      return {
+        ...schedule,
+        state: "schedule_ready",
+        persisted: false,
+        editorUrl: location.href,
+        message: "已填入 B 站定时，请在原页面核对分区及稿件并提交",
+        warnings: task._notes,
+      };
+    }
     attention(
       withNotes(
         task,
@@ -1499,10 +1845,7 @@
       }
       if (imageInput) await upload(imageInput, await file(task, thumb));
       else
-        note(
-          task,
-          "左侧还没有缩略图位置。视频填入后，在侧栏点「替换缩略图」",
-        );
+        note(task, "左侧还没有缩略图位置。视频填入后，在侧栏点「替换缩略图」");
     }
     const tagInput = field(
       'input[aria-label="标签"],input[aria-label="Tags"],input[aria-label*="tag"]',
@@ -1564,6 +1907,700 @@
         "视频和配文已填入 Instagram。请确认裁剪、封面和配文后自行分享。插件不会点分享，也不会修改页面脚本",
       ),
     );
+  }
+  function exactLeaves(root, label) {
+    return queryAll(
+      'button,[role="button"],[role="option"],[role="heading"],h1,h2,h3,h4,h5,h6,p,span,li,td,div',
+      root,
+    ).filter(
+      (el) =>
+        visible(el) &&
+        norm(el.textContent) === label &&
+        !Array.from(el.children).some(
+          (child) => norm(child.textContent) === label,
+        ),
+    );
+  }
+  function calendarCell(year, month, day) {
+    const combined = [`${year}年 ${month}月`, `${year}年${month}月`];
+    const visibleMonth =
+      combined.some((label) => exactLeaves(document, label).length) ||
+      (exactLeaves(document, `${year}年`).length &&
+        exactLeaves(document, `${month}月`).length);
+    if (!visibleMonth) return null;
+    // The date grid and the clocks can share one popover. Unpadded days
+    // distinguish the calendar rows from the hours/minutes columns.
+    const roots = exactLeaves(document, "1")
+      .map((dayOne) =>
+        sectionOf(dayOne, (node) =>
+          ["5", "8", "15", "22", String(day)].every(
+            (label) => exactLeaves(node, label).length,
+          ),
+        ),
+      )
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      );
+    const days = roots[0] ? exactLeaves(roots[0], String(day)) : [];
+    return days.length === 1 ? days[0] : null;
+  }
+  function sectionOf(label, predicate) {
+    let node = label;
+    for (let depth = 0; node && depth < 7; depth++, node = node.parentElement)
+      if (predicate(node)) return node;
+    return null;
+  }
+  function scheduleInput() {
+    return queryAll('input,[role="textbox"]').find(
+      (el) =>
+        visible(el) &&
+        /^\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}$/.test(
+          norm(el.value ?? el.textContent),
+        ),
+    );
+  }
+  function scheduleValue() {
+    const input = scheduleInput();
+    const parts = (input?.value ?? input?.textContent)?.match(/\d+/g);
+    return (
+      parts &&
+      `${parts[0]}-${parts[1].padStart(2, "0")}-${parts[2].padStart(2, "0")} ${parts[3].padStart(2, "0")}:${parts[4]}`
+    );
+  }
+  function schedulingControl() {
+    const selector =
+      'input[type="radio"],input[type="checkbox"],[role="switch"],[role="radio"],[role="checkbox"]';
+    const toggle = ["定时发布", "定时发表"]
+      .flatMap((text) => exactLeaves(document, text))
+      .map((label) =>
+        sectionOf(
+          label,
+          (el) =>
+            norm(el.textContent) === norm(label.textContent) &&
+            (el.matches(
+              'input[type="radio"],input[type="checkbox"],[role="switch"],[role="radio"],[role="checkbox"]',
+            ) ||
+              el.querySelector(
+                'input[type="radio"],input[type="checkbox"],[role="switch"],[role="radio"],[role="checkbox"]',
+              )),
+        ),
+      )
+      .find(Boolean);
+    return toggle?.matches(selector) ? toggle : toggle?.querySelector(selector);
+  }
+  function schedulingEnabled() {
+    const control = schedulingControl();
+    return (
+      control?.checked === true ||
+      control?.getAttribute("aria-checked") === "true"
+    );
+  }
+  async function enableScheduling() {
+    if (scheduleInput() && schedulingEnabled()) return;
+    const control = schedulingControl();
+    if (
+      !control ||
+      control.disabled ||
+      control.getAttribute("aria-disabled") === "true"
+    )
+      attention("平台定时开关不可用");
+    if (!schedulingEnabled()) control.click();
+    await wait(
+      () => schedulingEnabled() && scheduleInput(),
+      "平台未打开日期时间控件",
+      5000,
+    );
+  }
+  function pickerColumn(last) {
+    const labels = (el) =>
+      norm(el.textContent).match(/^(\d{2})(?:时|分)?$/)?.[1];
+    const zeros = [
+      ...exactLeaves(document, "00"),
+      ...exactLeaves(document, last === 23 ? "00时" : "00分"),
+    ];
+    return zeros
+      .map((zero) =>
+        sectionOf(zero, (node) => {
+          const numbers = new Set(
+            queryAll("div,span,li,button", node)
+              .filter(visible)
+              .map(labels)
+              .filter(Boolean)
+              .map(Number),
+          );
+          return numbers.size === last + 1 && numbers.has(last);
+        }),
+      )
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+      )[0];
+  }
+  function pickerPart(root, text, suffix) {
+    return [...exactLeaves(root, text + suffix), ...exactLeaves(root, text)][0];
+  }
+  async function setDouyinTimePart(value, suffix, offset, last) {
+    const matches = () => scheduleValue()?.slice(offset, offset + 2) === value;
+    // The wheel can settle on an intermediate row when the requested
+    // option starts outside its visible area.
+    for (let attempt = 0; attempt < 8 && !matches(); attempt++) {
+      const column = pickerColumn(last);
+      if (!column) attention("抖音时分列表已关闭");
+      const options = [
+        ...exactLeaves(column, value + suffix),
+        ...exactLeaves(column, value),
+      ];
+      if (!options.length)
+        attention("抖音时分列表未找到选项 " + value + suffix);
+      const moves = options
+        .flatMap((option) => {
+          const scroll = sectionOf(
+            option.parentElement,
+            (node) =>
+              node.clientHeight > 0 &&
+              node.scrollHeight > node.clientHeight &&
+              /auto|scroll/.test(getComputedStyle(node).overflowY),
+          );
+          if (!scroll) return [];
+          const row = option.getBoundingClientRect();
+          const viewport = scroll.getBoundingClientRect();
+          const position =
+            scroll.scrollTop +
+            row.top +
+            row.height / 2 -
+            viewport.top -
+            viewport.height / 2;
+          if (
+            position < 0 ||
+            position > scroll.scrollHeight - scroll.clientHeight
+          )
+            return [];
+          return [
+            {
+              scroll,
+              position,
+              distance: Math.abs(position - scroll.scrollTop),
+            },
+          ];
+        })
+        .sort((a, b) => a.distance - b.distance);
+      if (moves[0]) moves[0].scroll.scrollTop = moves[0].position;
+      else options[0].click();
+      await sleep(550);
+    }
+    if (!matches()) attention("抖音未接受预约时间选项 " + value + suffix);
+  }
+  async function setNativeTime(task, expected) {
+    await enableScheduling();
+    if (scheduleValue() === expected) return;
+    const [date, clock] = expected.split(" ");
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = clock.split(":");
+    const input = scheduleInput();
+    input.focus?.();
+    await sleep(150);
+    if (!calendarCell(year, month, day) && !pickerColumn(23)) click(input);
+    if (scheduleValue()?.split(" ")[0] !== date) {
+      const dayButton = await wait(
+        () => calendarCell(year, month, day),
+        "当前日历无法唯一确认预约日期 " + date,
+        5000,
+      );
+      click(dayButton);
+      await wait(
+        () => scheduleValue()?.startsWith(date),
+        "平台未接受预约日期 " + date,
+        4000,
+      );
+    }
+    if (scheduleValue() === expected) return;
+    if (task.platform === "douyin" && !pickerColumn(23)) {
+      const currentClock = scheduleValue()?.split(" ")[1];
+      const opener = currentClock && exactLeaves(document, currentClock)[0];
+      if (!opener) attention("未找到抖音时间列表");
+      click(opener);
+    }
+    const hours = await wait(() => pickerColumn(23), "未找到小时列表", 4000);
+    const minutes = await wait(() => pickerColumn(59), "未找到分钟列表", 4000);
+    if (task.platform === "douyin") {
+      await setDouyinTimePart(hour, "时", 11, 23);
+      await setDouyinTimePart(minute, "分", 14, 59);
+    } else if (scheduleValue()?.slice(11, 13) !== hour) {
+      click(pickerPart(hours, hour, "时"));
+      await wait(
+        () => scheduleValue()?.slice(11, 13) === hour,
+        "平台未接受预约小时",
+        4000,
+      );
+    }
+    if (task.platform !== "douyin" && scheduleValue()?.slice(14) !== minute) {
+      click(pickerPart(minutes, minute, "分"));
+      await wait(
+        () => scheduleValue() === expected,
+        "平台未接受完整预约时间 " + expected,
+        4000,
+      );
+    }
+    scheduleInput()?.blur?.();
+    await sleep(350);
+    if (scheduleValue() !== expected)
+      attention("日期选择器关闭后预约时间发生变化");
+  }
+  function bilibiliScheduleValue() {
+    const date = field(".time-container .date-picker-date .date-show");
+    const timer = field(".time-container .date-picker-timer .date-show");
+    return date && timer
+      ? norm(date.textContent) + " " + norm(timer.textContent)
+      : "";
+  }
+  async function chooseBilibiliDate(date) {
+    const [year, month, day] = date.split("-").map(Number);
+    const calendarTitle = () => field(".date-picker-nav-title");
+    if (!calendarTitle()) click(field(".time-container .date-picker-date"));
+    const heading = await wait(calendarTitle, "B 站未打开预约日历", 4000);
+    const monthIndex = (text) => {
+      const match = /^(\d{4})年\s*(\d{1,2})月$/.exec(norm(text));
+      return match ? Number(match[1]) * 12 + Number(match[2]) : NaN;
+    };
+    const target = year * 12 + month;
+    const distance = target - monthIndex(heading.textContent);
+    if (!Number.isInteger(distance) || Math.abs(distance) > 1)
+      attention("B 站预约日历没有显示目标月份附近的日期");
+    if (distance !== 0) {
+      const arrow = field(distance > 0 ? ".next-btn-month" : ".prev-btn-month");
+      if (!arrow || arrow.classList.contains("date-select-disabled"))
+        attention("B 站预约日历无法切换目标月份");
+      click(arrow);
+      await wait(
+        () => monthIndex(calendarTitle()?.textContent) === target,
+        "B 站未显示目标月份",
+        3000,
+      );
+    }
+    const cell = await wait(
+      () => {
+        const options = queryAll(
+          ".date-wrp .date-picker-body-item.date-item",
+        ).filter(
+          (item) =>
+            visible(item) &&
+            norm(item.textContent) === String(day) &&
+            !item.classList.contains("date-item-disabled"),
+        );
+        return options.length === 1 ? options[0] : null;
+      },
+      "B 站不能唯一确认可选预约日期 " + date,
+      4000,
+    );
+    click(cell);
+    await wait(
+      () => bilibiliScheduleValue().startsWith(date + " "),
+      "B 站没有保留预约日期 " + date,
+      4000,
+    );
+  }
+  async function chooseBilibiliCategory(category) {
+    const select = () => {
+      const controls = queryAll(
+        ".selector-container .select-controller",
+      ).filter(visible);
+      if (controls.length === 1) return controls[0];
+      const heading = exactLeaves(document, "分区");
+      if (heading.length !== 1) return null;
+      const section = sectionOf(
+        heading[0],
+        (node) =>
+          controls.filter((control) => node.contains(control)).length === 1,
+      );
+      return section && controls.find((control) => section.contains(control));
+    };
+    if (norm(select()?.textContent) === category) return;
+    click(select());
+    const option = await wait(
+      () =>
+        queryAll(".drop-list-v2-item-cont").find(
+          (item) => visible(item) && norm(item.textContent) === category,
+        ),
+      "B 站没有显示指定分区「" + category + "」",
+      5000,
+    );
+    click(option);
+    await wait(
+      () => norm(select()?.textContent) === category,
+      "B 站未保留指定分区「" + category + "」",
+      5000,
+    );
+  }
+  async function chooseBilibiliTime([hour, minute]) {
+    const clock = () => field(".time-container .date-picker-timer .date-show");
+    const groups = () =>
+      queryAll(".time-picker-panel-select-wrp").filter(visible);
+    const parts = () => norm(clock()?.textContent).split(":");
+    for (const [index, value] of [hour, minute].entries()) {
+      if (parts()[index] === value) continue;
+      if (!groups().length) click(clock());
+      const choice = await wait(
+        () => {
+          const panels = groups();
+          if (panels.length !== 2) return null;
+          return [
+            ...panels[index].querySelectorAll(".time-picker-panel-select-item"),
+          ].find(
+            (option) =>
+              visible(option) &&
+              norm(option.textContent) === value &&
+              !option.classList.contains("time-select-disabled"),
+          );
+        },
+        "B 站没有可选的预约时分 " + value,
+        4000,
+      );
+      click(choice);
+    }
+  }
+  function bilibiliZoneMatches() {
+    return /^\(UTC\+08:00\)/.test(
+      field(".date-picker-timezone-wrp input")?.value || "",
+    );
+  }
+  function bilibiliScheduleMatches(task, copyMatches) {
+    return (
+      field(".time-container .switch-container")?.classList.contains(
+        "switch-container-active",
+      ) &&
+      bilibiliZoneMatches() &&
+      bilibiliScheduleValue() ===
+        task.schedule.at.slice(0, 16).replace("T", " ") &&
+      copyMatches()
+    );
+  }
+  async function configureBilibiliSchedule(task, copyMatches) {
+    const expected = task.schedule.at.slice(0, 16).replace("T", " ");
+    const issue = scheduleWindowIssue(task.platform, task.schedule.at);
+    if (issue) attention(issue);
+    if (!copyMatches()) attention("B 站完整文案还待核对");
+    await status(task, "filling", "写入 B 站原生定时");
+    const toggle = field(".time-container .switch-container");
+    if (!toggle) attention("B 站没有出现定时开关");
+    if (!toggle.classList.contains("switch-container-active")) click(toggle);
+    await wait(
+      () => bilibiliZoneMatches() && bilibiliScheduleValue(),
+      "B 站定时或 UTC+08:00 时区未开启",
+      5000,
+    );
+    const [date, timeOfDay] = expected.split(" ");
+    if (!bilibiliScheduleValue().startsWith(date + " "))
+      await chooseBilibiliDate(date);
+    await chooseBilibiliTime(timeOfDay.split(":"));
+    const matches = () => bilibiliScheduleMatches(task, copyMatches);
+    await wait(matches, "B 站未完整显示预约时间 " + expected, 5000);
+    if (task.aiGenerated) {
+      await status(task, "filling", "核对 B 站创作声明");
+      const disclosure = () => field('input[placeholder*="创作声明"]');
+      if (!disclosure()) attention("B 站未显示创作声明，请核对原页面");
+      const { statement } = PLATFORMS.bilibili.schedule.disclosure;
+      if (disclosure().value !== statement) {
+        click(disclosure());
+        await clickText(statement);
+      }
+      await wait(
+        () => disclosure()?.value === statement,
+        "B 站未保留创作声明「" + statement + "」",
+        4000,
+      );
+    }
+    const collection = task.collection ?? task.schedule.collection;
+    if (collection) await selectVideoCollection(collection, task.platform);
+    if (!matches()) attention("B 站定时或文案发生变化，请核对原页面");
+    return {
+      scheduledAt: task.schedule.at,
+      evidence: "B 站编辑器显示定时 " + expected + " (UTC+08:00)",
+    };
+  }
+  async function selectVideoCollection(collection, platform) {
+    if (!collection) return;
+    const selected = () =>
+      ["加入合集", "添加合集", "合集"].some((label) =>
+        exactLeaves(document, label).some((el) =>
+          sectionOf(
+            el,
+            (node) =>
+              exactLeaves(node, collection).length === 1 &&
+              !exactLeaves(node, "创建合集").length &&
+              !exactLeaves(node, "选择合集").length &&
+              !exactLeaves(node, "请选择合集").length &&
+              norm(node.textContent).length < 180,
+          ),
+        ),
+      );
+    if (selected()) return;
+    const opener = controlByText(["选择合集", "请选择合集"]);
+    if (!opener) attention("未找到平台合集入口");
+    click(opener);
+    const item = await wait(
+      () => {
+        const options = exactLeaves(document, collection);
+        return options.length === 1 ? options[0] : null;
+      },
+      "未找到唯一的合集「" + collection + "」",
+      6000,
+    );
+    if (platform === "douyin") {
+      const row =
+        item.closest('[role="option"]') ||
+        sectionOf(
+          item,
+          (node) =>
+            compact(node.textContent).startsWith(compact(collection)) &&
+            /共\d+个作品$/.test(compact(node.textContent)),
+        ) ||
+        item;
+      // Use the point over the title that the creator's dropdown exposes
+      // for selection. Scrolling the portal can dismiss it.
+      const bounds = item.getBoundingClientRect();
+      const point = {
+        clientX: bounds.left + bounds.width / 2,
+        clientY: bounds.top + bounds.height / 2,
+      };
+      const actual = item.ownerDocument.elementFromPoint?.(
+        point.clientX,
+        point.clientY,
+      );
+      const target = actual && row.contains(actual) ? actual : item;
+      const options = {
+        ...point,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      };
+      if (typeof PointerEvent === "function")
+        target.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            ...options,
+            pointerType: "mouse",
+            isPrimary: true,
+          }),
+        );
+      if (typeof MouseEvent === "function") {
+        for (const type of ["mousedown", "mouseup", "click"])
+          target.dispatchEvent(new MouseEvent(type, options));
+      } else target.click();
+    } else click(item);
+    await wait(selected, "平台未确认选中合集「" + collection + "」", 5000);
+  }
+  async function selectVideoDisclosure(task) {
+    if (!task.aiGenerated) return;
+    const rule = PLATFORMS[task.platform].schedule.disclosure;
+    if (!rule) {
+      note(task, "请在平台核对 AI 内容声明");
+      return;
+    }
+    const { opener, statement, confirm } = rule;
+    const control = controlByText(opener);
+    const disclosureOption = () =>
+      controlByText(statement) ||
+      exactLeaves(document, statement)[0] ||
+      queryAll('button,[role="option"],[role="menuitem"],label,li,span,div')
+        .filter(
+          (element) =>
+            visible(element) &&
+            compact(element.textContent) === compact(statement),
+        )
+        .sort(
+          (a, b) =>
+            a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+        )[0];
+    if (control) {
+      click(control);
+      await sleep(500);
+      if (!disclosureOption() && task.platform === "xiaohongshu") {
+        const row = sectionOf(
+          control,
+          (node) =>
+            norm(node.textContent) === opener &&
+            node.querySelector('svg,i,[role="combobox"],[aria-haspopup]'),
+        );
+        if (row) {
+          const bounds = row.getBoundingClientRect();
+          const root = row.getRootNode();
+          const arrow = root.elementFromPoint?.(
+            bounds.right - 10,
+            bounds.top + bounds.height / 2,
+          );
+          const trigger =
+            arrow && row.contains(arrow)
+              ? arrow
+              : queryAll('svg,i,[role="combobox"],[aria-haspopup]', row)
+                  .filter(visible)
+                  .at(-1);
+          if (trigger && typeof MouseEvent === "function") {
+            // The disclosure dropdown can put its handler on the chevron,
+            // independently of the adjacent text label.
+            for (const type of ["mousedown", "mouseup", "click"])
+              trigger.dispatchEvent(
+                new MouseEvent(type, { bubbles: true, composed: true }),
+              );
+          } else if (trigger?.click) click(trigger);
+          else if (row !== control) click(row);
+        }
+      }
+      click(
+        await wait(
+          disclosureOption,
+          "未找到平台 AI 声明「" + statement + "」",
+          8000,
+        ),
+      );
+      if (confirm) await clickText(confirm);
+    }
+    await wait(disclosureOption, "平台未确认 AI 内容声明", 5000);
+  }
+  async function configureVideoSchedule(task, coverOk, copyMatches) {
+    const schedule = task.schedule;
+    const { collectionAfterTime, submitLabel, receiptPath } =
+      PLATFORMS[task.platform].schedule;
+    const expected = schedule.at.slice(0, 16).replace("T", " ");
+    const collection = task.collection ?? schedule.collection;
+    const issue = scheduleWindowIssue(task.platform, schedule.at);
+    if (issue) attention(issue);
+    if (
+      !coverOk ||
+      task._notes?.some((note) =>
+        /没有完整写入|只上传了一张|未找到封面比例|核对裁切/.test(note),
+      )
+    )
+      attention("请先核对文案和要求的封面，再继续设置定时");
+    if (!collectionAfterTime) {
+      await status(task, "filling", "选择合集");
+      await selectVideoCollection(collection, task.platform);
+    }
+    await status(task, "filling", "写入平台原生定时");
+    await setNativeTime(task, expected);
+    if (!copyMatches()) attention("设置定时后标题或描述发生变化，已保留原页面");
+    const ready = {
+      state: "schedule_ready",
+      persisted: false,
+      scheduledAt: schedule.at,
+      editorUrl: location.href,
+      evidence:
+        "平台编辑器显示定时 " +
+        expected +
+        (collection ? "，合集「" + collection + "」" : ""),
+    };
+    await status(task, "filling", "核对平台内容声明");
+    try {
+      await selectVideoDisclosure(task);
+    } catch (error) {
+      if (
+        !error.needsAttention ||
+        !copyMatches() ||
+        scheduleValue() !== expected ||
+        !schedulingEnabled()
+      )
+        throw error;
+      if (collectionAfterTime)
+        await selectVideoCollection(collection, task.platform);
+      return {
+        ...ready,
+        message: "定时和合集已写入，AI 声明待确认，尚未提交",
+        warnings: [...(task._notes || []), error.message],
+      };
+    }
+    if (collectionAfterTime) {
+      await status(task, "filling", "选择合集");
+      await selectVideoCollection(collection, task.platform);
+    }
+    if (!schedule.submit || task.fillOnly || !submitLabel)
+      return {
+        ...ready,
+        message: "已填入定时，请在原页面核对并提交",
+        warnings: task._notes,
+      };
+    const button = queryAll('button,[role="button"]').find(
+      (el) =>
+        visible(el) &&
+        !el.disabled &&
+        el.getAttribute("aria-disabled") !== "true" &&
+        norm(el.textContent) === submitLabel,
+    );
+    if (
+      !button ||
+      !schedulingEnabled() ||
+      scheduleValue() !== expected ||
+      scheduleWindowIssue(task.platform, schedule.at)
+    )
+      attention("无法核对平台定时提交按钮或完整预约时间");
+    // General editing helpers still reject Publish. Only the verified
+    // scheduled action above may be submitted with the explicit CLI flag.
+    const beforeUrl = location.href;
+    if (/发布成功|预约成功/.test(document.body.innerText))
+      attention("页面已有成功提示，请核对对应作品，避免重发");
+    let accepted;
+    try {
+      accepted = await status(
+        task,
+        "submitting",
+        "提交平台原生定时 " + expected,
+      );
+    } catch (error) {
+      accepted = { error: error.message };
+    }
+    if (accepted?.ok !== true)
+      return {
+        ...ready,
+        message: "定时已写入，提交状态未保存，尚未点击提交",
+        warnings: [...(task._notes || []), accepted?.error].filter(Boolean),
+      };
+    if (
+      !schedulingEnabled() ||
+      scheduleValue() !== expected ||
+      !button.isConnected ||
+      !visible(button) ||
+      button.disabled ||
+      button.getAttribute("aria-disabled") === "true" ||
+      norm(button.textContent) !== submitLabel ||
+      scheduleWindowIssue(task.platform, schedule.at) ||
+      !copyMatches()
+    )
+      return {
+        ...ready,
+        state: "needs_attention",
+        message: "点击提交前的平台状态发生变化，请核对原页面",
+      };
+    button.click();
+    try {
+      const receipt = await wait(
+        () => {
+          const result =
+            document.body.innerText.match(/定时发布成功|预约成功|发布成功/);
+          if (result && !scheduleInput()) return result[0];
+          if (
+            receiptPath?.test(location.pathname) &&
+            location.href !== beforeUrl
+          )
+            return "小红书进入发布成功页";
+          return null;
+        },
+        "未取得平台回执",
+        20000,
+      );
+      return {
+        ...ready,
+        state: "scheduled",
+        persisted: true,
+        message: "平台已确认定时 " + expected,
+        evidence: ready.evidence + "；" + receipt,
+      };
+    } catch {
+      return {
+        ...ready,
+        state: "schedule_unconfirmed",
+        message: "已点击定时提交但没有回执；先核对作品管理，避免重发",
+      };
+    }
   }
   async function video(task) {
     auth();
@@ -1630,7 +2667,11 @@
         "未找到 X 视频上传控件",
       );
     if (!input && task.platform === "douyin")
-      input = document.querySelector("input[type=file]");
+      input = await wait(
+        () => inputFor("video") || document.querySelector("input[type=file]"),
+        "抖音上传页未出现视频选择框，请检查账号和页面",
+        20000,
+      );
     if (!input) attention("未找到视频上传控件，请先进入平台的视频上传页");
     await upload(input, await file(task, asset));
     if (task.platform === "xiaohongshu") {
@@ -1673,6 +2714,14 @@
         ["编辑封面", "设置封面", "修改封面"],
         ["3:4", "3：4"],
       );
+      if (task.schedule)
+        return configureVideoSchedule(
+          task,
+          covered,
+          () =>
+            title.value === task.title &&
+            compact(plainText(desc)) === compact(task.description || ""),
+        );
       if (task.fillOnly)
         attention(
           covered
@@ -1689,6 +2738,15 @@
       await fillChannelsCopy(task);
       await waitUploadIdle();
       const covered = await uploadChannelCovers(task);
+      if (task.schedule)
+        return configureVideoSchedule(
+          task,
+          covered,
+          () =>
+            editorText(channelsTitle()) === task.title &&
+            compact(editorText(channelsDescription())) ===
+              compact(task.description || ""),
+        );
       if (task.fillOnly)
         attention(
           withNotes(
@@ -1711,13 +2769,17 @@
       return result(task, "视频号显示保存草稿成功");
     }
     if (task.platform === "douyin") {
-      const title = await wait(() => {
-        const input = douyinTitle();
-        if (input) return input;
-        const editable = field("[contenteditable=true]");
-        if (editable && !douyinDescription(null)) return editable;
-        return null;
-      }, "等待抖音编辑表单超时", 300000);
+      const title = await wait(
+        () => {
+          const input = douyinTitle();
+          if (input) return input;
+          const editable = field("[contenteditable=true]");
+          if (editable && !douyinDescription(null)) return editable;
+          return null;
+        },
+        "等待抖音编辑表单超时",
+        300000,
+      );
       const copy = task.description || "";
       const desc = copy
         ? await wait(
@@ -1728,7 +2790,7 @@
         : null;
       if (desc && desc !== title) {
         textField(title, task.title);
-        await fillEditable(desc, copy);
+        await fillEditable(desc, copy, { pasteFirst: copy.includes("\n") });
         if (compact(plainText(desc)) !== compact(copy))
           note(task, "作品描述没有完整写入，请在描述框核对");
       } else if (title.matches("input,textarea")) {
@@ -1743,6 +2805,14 @@
       if (topicsHost) await confirmTopics(task, topicsHost);
       await waitUploadIdle();
       const covered = await uploadDouyinCovers(task);
+      if (task.schedule)
+        return configureVideoSchedule(
+          task,
+          covered,
+          () =>
+            editorText(title) === task.title &&
+            compact(editorText(desc)) === compact(copy),
+        );
       attention(
         withNotes(
           task,
@@ -1898,7 +2968,8 @@
     }
     if (message?.type !== "RUN_DRAFT") return false;
     const task = message.task;
-    if (origins[task.platform] !== location.origin) {
+    const platform = PLATFORMS[task.platform];
+    if (!platform || new URL(platform.url).origin !== location.origin) {
       reply({ ok: false, error: "当前页面与目标平台不匹配" });
       return false;
     }
@@ -1923,6 +2994,10 @@
         if (task.platform === "wechat") return wechatArticle(task);
         if (task.platform === "xiaohongshu") return xhsArticle(task);
         if (task.platform === "x") return xArticle(task);
+      }
+      if (task.schedule) {
+        const issue = scheduleWindowIssue(task.platform, task.schedule.at);
+        if (issue) attention(issue);
       }
       if (task.platform === "bilibili") return bilibiliVideo(task);
       if (task.platform === "youtube") return youtubeVideo(task);

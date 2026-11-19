@@ -50,22 +50,53 @@
       ) || text.match(/([\d,.]+\s*[万亿])\s*(?:赞|喜欢|like)/i);
     return match ? match[1] : "";
   }
+  const WORK_ROW_SELECTOR =
+    'tr, li, article, [role="listitem"], ytcp-video-row, .video-item, .note-item, .content-item, .post-item';
+  const ACTION_SELECTOR = 'button, [role="button"], a';
+  function pendingStatus(row, titleNode) {
+    if (!row) return "";
+    const texts = queryAll("span, div, p, time, [class*='status']", row)
+      .filter(
+        (node) =>
+          !node.contains(titleNode) &&
+          !titleNode.contains(node) &&
+          !node.closest(`${ACTION_SELECTOR}, [hidden], [aria-hidden="true"]`) &&
+          !node.querySelector(ACTION_SELECTOR),
+      )
+      .map((node) => norm(node.innerText || node.textContent));
+    if (texts.some((text) => /^定时发布(?:$|\s*[:：]?\s*\d)/.test(text)))
+      return "定时发布";
+    return (
+      texts.find((text) =>
+        /^(审核中|转码中|发布中|发布失败|草稿|待发布)$/.test(text),
+      ) || ""
+    );
+  }
   function fromNodes(nodes) {
     const items = [];
-    const seen = new Set();
+    const seen = [];
     for (const node of nodes) {
       const title = norm(node.textContent || node.getAttribute?.("alt"));
-      if (!goodTitle(title) || seen.has(title)) continue;
+      if (!goodTitle(title)) continue;
       if (node.closest?.("nav, header, footer")) continue;
-      seen.add(title);
-      const row =
-        node.closest?.("tr, li, article, ytcp-video-row, section") ||
-        node.parentElement;
+      const row = node.closest(WORK_ROW_SELECTOR);
+      const sameItem = seen.some(
+        (item) =>
+          item.title === title &&
+          ((row && item.row === row) ||
+            item.node.contains(node) ||
+            node.contains(item.node)),
+      );
+      if (sameItem) continue;
+      seen.push({ title, row, node });
       const link = node.closest?.("a") || node.querySelector?.("a");
       items.push({
         title,
-        likesText: likesText(row),
+        likesText: likesText(
+          row || node.closest("section") || node.parentElement,
+        ),
         href: link?.href || node.href || "",
+        pendingStatus: pendingStatus(row, node),
       });
       if (items.length >= 80) break;
     }

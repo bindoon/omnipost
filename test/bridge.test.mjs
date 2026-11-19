@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
@@ -18,8 +19,9 @@ const task = (id = "job-1", platforms = ["x"]) => ({
   platforms,
   mode: "draft",
 });
-async function fixture(t) {
+async function fixture(t, prepare) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "publisher-bridge-"));
+  await prepare?.(dir);
   const b = await startBridge({ port: 0, dataDir: dir, token });
   t.after(async () => {
     await b.close();
@@ -39,6 +41,26 @@ async function fixture(t) {
     return { status: r.status, value: await r.json() };
   }
   return { b, dir, root, req };
+}
+function videoTask(id, filePath, size, extra = {}) {
+  return {
+    id,
+    kind: "video",
+    title: "人体的河流",
+    description: "完整版",
+    assets: [
+      {
+        id: id + "-asset",
+        role: "video",
+        type: "video/mp4",
+        name: "video.mp4",
+        size,
+        filePath,
+      },
+    ],
+    platforms: ["douyin"],
+    ...extra,
+  };
 }
 function inbox(ws) {
   const values = [],
@@ -117,6 +139,104 @@ test("桥接需要令牌并拒绝普通网页来源，健康检查不会暴露�
     "true",
   );
   assert.equal(preflight.headers.get("access-control-allow-origin"), origin);
+});
+test("未指定 ID 的视频重复请求可复用，平台差异、定时和内容改动保留独立任务", async (t) => {
+  const { dir, req } = await fixture(t);
+  const first = path.join(dir, "first.mp4");
+  const copy = path.join(dir, "copy.mp4");
+  const different = path.join(dir, "different.mp4");
+  await fs.writeFile(first, "video");
+  await fs.copyFile(first, copy);
+  await fs.writeFile(different, "other");
+  const request = (id, source = first, extra = {}) =>
+    req(
+      "/jobs",
+      "POST",
+      videoTask(id, source, 5, { deduplicate: true, ...extra }),
+    );
+
+  const [a, b] = await Promise.all([request("a"), request("b", copy)]);
+  assert.deepEqual([a.status, b.status].sort(), [200, 201]);
+  assert.equal(a.value.id, b.value.id);
+  assert.equal(
+    a.value.assets[0].sha256,
+    createHash("sha256").update("video").digest("hex"),
+  );
+  assert.equal("filePath" in a.value.assets[0], false);
+  assert.equal(
+    (
+      await request("different-copy", first, {
+        overrides: { douyin: { description: "独立文案" } },
+      })
+    ).status,
+    201,
+  );
+  assert.equal(
+    (await request("different-platform", first, { platforms: ["xiaohongshu"] }))
+      .status,
+    201,
+  );
+  assert.equal(
+    (
+      await request("different-time", first, {
+        schedule: { at: "2026-11-20T07:00:00+08:00" },
+      })
+    ).status,
+    201,
+  );
+  assert.equal((await request("different-video", different)).status, 201);
+  assert.equal(
+    (await request("explicit-id", first, { deduplicate: false })).status,
+    201,
+  );
+  const withCover = async (id, contents) => {
+    const cover = path.join(dir, id + ".png");
+    await fs.writeFile(cover, contents);
+    const input = videoTask(id, first, 5, { deduplicate: true });
+    input.assets.push({
+      id: id + "-cover",
+      role: "cover-portrait",
+      type: "image/png",
+      name: id + ".png",
+      size: contents.length,
+      filePath: cover,
+    });
+    return req("/jobs", "POST", input);
+  };
+  assert.equal((await withCover("portrait-a", "image")).status, 201);
+  assert.equal((await withCover("portrait-b", "image")).status, 200);
+  assert.equal((await withCover("portrait-c", "other")).status, 201);
+});
+
+test("旧桥接任务只为仍匹配原文件大小和时间的来源补算视频指纹", async (t) => {
+  const { req } = await fixture(t, async (dir) => {
+    const jobsDir = path.join(dir, "jobs");
+    await fs.mkdir(jobsDir);
+    for (const id of ["legacy-a", "legacy-b", "stale"]) {
+      const file = path.join(dir, `${id}.mp4`);
+      await fs.writeFile(file, "video");
+      const job = videoTask(id, file, 5, {
+        results: { douyin: { state: "ready" } },
+      });
+      job.assets[0].mtimeMs =
+        (await fs.stat(file)).mtimeMs - (id === "stale" ? 1 : 0);
+      await fs.writeFile(path.join(jobsDir, `${id}.json`), JSON.stringify(job));
+    }
+  });
+  assert.equal(
+    (
+      await req("/video-fingerprints", "GET", undefined, {
+        Authorization: "Bearer wrong",
+      })
+    ).status,
+    401,
+  );
+  const response = await req("/video-fingerprints");
+  const hash = createHash("sha256").update("video").digest("hex");
+  assert.deepEqual(response.value.fingerprints.sort(), [
+    ["legacy-a", "legacy-a-asset", hash],
+    ["legacy-b", "legacy-b-asset", hash],
+  ]);
 });
 test("AI 提交→模拟扩展领取与保存回包→AI 得到草稿链接；同一任务重复提交不重复分发", async (t) => {
   const { b, req } = await fixture(t);
@@ -394,6 +514,127 @@ test("旧扩展不能领取手动交接任务，但普通任务仍可派发", as
   await req("/jobs", "POST", task("old-auto"));
   assert.equal((await next()).task.id, "old-auto");
   assert.equal((await req("/jobs/new-manual")).value.results.x.state, "queued");
+});
+
+test("定时任务只交给新版扩展，提交断线后拒绝盲目重试", async (t) => {
+  const { b, dir, req } = await fixture(t);
+  const old = await worker(t, b);
+  const assets = [];
+  for (const [role, name, type] of [
+    ["video", "clip.mp4", "video/mp4"],
+    ["cover-landscape", "landscape.jpg", "image/jpeg"],
+    ["cover-portrait", "portrait.jpg", "image/jpeg"],
+  ]) {
+    const filePath = path.join(dir, name);
+    await fs.writeFile(filePath, role);
+    assets.push({ id: role, role, name, type, filePath, size: role.length });
+  }
+  const schedule = {
+    at: "2035-11-20T07:00:00+08:00",
+    collection: "人体的河流",
+    submit: true,
+  };
+  const data = {
+    id: "schedule",
+    kind: "video",
+    title: "这是一条视频",
+    platforms: ["douyin"],
+    assets,
+    schedule,
+  };
+  assert.equal((await req("/jobs", "POST", data)).status, 201);
+  assert.equal(
+    (await req("/jobs/schedule")).value.results.douyin.state,
+    "queued",
+  );
+  assert.equal(
+    (
+      await req("/jobs", "POST", {
+        ...data,
+        schedule: { ...schedule, at: "2035-11-20T12:00:00+08:00" },
+      })
+    ).status,
+    409,
+  );
+  old.ws.close();
+  await until(async () => !(await req("/health")).value.connected);
+  const update = await worker(t, b, ["manual-stage", "native-video-schedule"]);
+  assert.deepEqual((await update.next()).task.schedule, schedule);
+  update.ws.send(
+    JSON.stringify({
+      type: "result",
+      id: data.id,
+      platform: "douyin",
+      result: { state: "submitting", message: "平台已开始提交" },
+    }),
+  );
+  assert.equal((await update.next()).type, "ack");
+  update.ws.close();
+  await until(
+    async () =>
+      (await req("/jobs/schedule")).value.results.douyin.state ===
+      "schedule_unconfirmed",
+  );
+  assert.equal(
+    (await req("/jobs/schedule/retry/douyin", "POST", {})).status,
+    409,
+  );
+});
+
+test("B 站无合集的定时填充等待理解该能力的扩展", async (t) => {
+  const { b, dir, req } = await fixture(t);
+  const capabilities = ["manual-stage", "native-video-schedule"];
+  const earlier = await worker(t, b, capabilities);
+  const filePath = path.join(dir, "bili.mp4");
+  await fs.writeFile(filePath, "video");
+  const data = {
+    id: "bili-schedule",
+    kind: "video",
+    title: "这是一条视频",
+    platforms: ["bilibili"],
+    assets: [
+      {
+        id: "v",
+        role: "video",
+        name: "bili.mp4",
+        type: "video/mp4",
+        filePath,
+        size: 5,
+      },
+    ],
+    schedule: { at: "2035-11-20T07:00:00+08:00" },
+    overrides: { bilibili: { category: "知识" } },
+  };
+  assert.equal((await req("/jobs", "POST", data)).status, 201);
+  assert.equal(
+    (await req("/jobs/bili-schedule")).value.results.bilibili.state,
+    "queued",
+  );
+  assert.equal((await req("/health")).value.nativeBilibiliSchedule, false);
+  assert.equal(
+    (
+      await req("/jobs", "POST", {
+        ...data,
+        id: "blocked-submit",
+        schedule: { ...data.schedule, submit: true },
+      })
+    ).status,
+    400,
+  );
+  earlier.ws.close();
+  await until(async () => !(await req("/health")).value.connected);
+  const updated = await worker(t, b, [
+    ...capabilities,
+    "native-bilibili-schedule",
+  ]);
+  const { task } = await updated.next();
+  assert.deepEqual(task.schedule, {
+    ...data.schedule,
+    collection: "",
+    submit: false,
+  });
+  assert.deepEqual(task.overrides, data.overrides);
+  assert.equal((await req("/health")).value.nativeBilibiliSchedule, true);
 });
 
 test("删除交接记录时保留源文件", async (t) => {

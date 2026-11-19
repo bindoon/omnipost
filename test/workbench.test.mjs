@@ -120,6 +120,107 @@ test("完整工作台先按视频或文章列出平台状态", async () => {
   assert.equal(document.querySelectorAll("[data-step]").length, 4);
 });
 
+test("相同 SHA-256 在工作台只显示一张视频卡，保留旧任务的平台入口", async () => {
+  const { document } = parseHTML(
+    '<html><body><div id="app"></div></body></html>',
+  );
+  const source = (
+    await fs.readFile(
+      new URL("../extension/workbench.js", import.meta.url),
+      "utf8",
+    )
+  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
+  const hash = "a".repeat(64);
+  const createVideo = (id, date, platform, result, sha256) => ({
+    id,
+    kind: "video",
+    title: "同名视频",
+    createdAt: `2026-11-${date}T00:00:00.000Z`,
+    platforms: [platform],
+    bridgeJob: true,
+    results: { [platform]: result },
+    assets: [
+      {
+        id: id + "-file",
+        role: "video",
+        name: id + ".mp4",
+        type: "video/mp4",
+        size: 33 * 1024 ** 2,
+        sha256,
+      },
+    ],
+  });
+  const jobs = [
+    createVideo("older", "18", "xiaohongshu", { state: "draft_ready" }),
+    createVideo("newer", "19", "douyin", { state: "scheduled" }, hash),
+    createVideo(
+      "different-video",
+      "17",
+      "channels",
+      { state: "ready" },
+      "b".repeat(64),
+    ),
+  ];
+  const messages = [];
+  vm.runInContext(
+    source,
+    vm.createContext({
+      document,
+      window: { scrollTo() {} },
+      location: { search: "", href: "chrome-extension://test/workbench.html" },
+      URL,
+      URLSearchParams,
+      crypto,
+      console,
+      ...model,
+      get: async () => undefined,
+      put: async () => {},
+      chrome: {
+        runtime: {
+          id: "test",
+          async sendMessage(message) {
+            messages.push(message);
+            if (message.type === "STATE")
+              return { ok: true, jobs, bridge: { connected: true } };
+            if (message.type === "VIDEO_FINGERPRINTS")
+              return {
+                ok: true,
+                fingerprints: [["older", "older-file", hash]],
+              };
+            return { ok: true };
+          },
+        },
+        storage: {
+          local: { get: async () => ({}) },
+          onChanged: { addListener() {} },
+        },
+      },
+      setTimeout,
+      clearTimeout,
+    }),
+  );
+  await new Promise(setImmediate);
+  const cards = document.querySelectorAll(".content-card");
+  assert.equal(cards.length, 2);
+  assert.equal(document.querySelectorAll("[data-preview-for]").length, 2);
+  assert.match(
+    cards[0].querySelector("summary").textContent,
+    /同一视频的 2 个任务/,
+  );
+  assert.ok(cards[0].querySelector("details [data-delete=older]"));
+  assert.ok(cards[0].querySelector("details [data-delete=newer]"));
+  assert.match(cards[0].textContent, /定时已提交/);
+  cards[0].querySelector("[data-sync=open][data-job=older]").click();
+  await new Promise(setImmediate);
+  assert.ok(
+    messages.some(
+      (m) =>
+        m.type === "OPEN" && m.id === "older" && m.platform === "xiaohongshu",
+    ),
+  );
+  assert.ok(cards[1].querySelector("[data-history=different-video]"));
+});
+
 test("视频读不到时列表显示封面，并可以删除这条草稿", async () => {
   const { document, window } = parseHTML(
     '<html><body><div id="app"></div></body></html>',

@@ -50,4 +50,14 @@ await build({
   target: "chrome116",
   minify: false,
 });
+await build({
+  entryPoints: [
+    new URL("./extension/content/runner.js", import.meta.url).pathname,
+  ],
+  outfile: new URL("content/runner.js", dist).pathname,
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "chrome116",
+});
 console.log("Extension built: " + new URL("./dist", import.meta.url).pathname);

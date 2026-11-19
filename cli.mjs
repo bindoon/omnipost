@@ -26,7 +26,8 @@ function options(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith("--")) {
       const k = args[i].slice(2);
-      if (k === "ai-generated" || k === "full" || k === "stage") o[k] = true;
+      if (["ai-generated", "full", "stage", "submit-scheduled"].includes(k))
+        o[k] = true;
       else {
         if (!args[i + 1] || args[i + 1].startsWith("--"))
           throw new Error("参数缺少值：" + k);
@@ -92,6 +93,8 @@ export async function importTask(kind, source, opts = {}) {
   const overrides = opts.overrides
     ? JSON.parse(await fs.readFile(path.resolve(opts.overrides), "utf8"))
     : {};
+  if (!opts["schedule-at"] && (opts.collection || opts["submit-scheduled"]))
+    throw new Error("请先提供 --schedule-at");
   return validateTask({
     id: opts.id || crypto.randomUUID(),
     kind,
@@ -102,6 +105,15 @@ export async function importTask(kind, source, opts = {}) {
     assets,
     delivery: opts.stage ? "manual" : "auto",
     aiGenerated: Boolean(opts["ai-generated"]),
+    ...(opts["schedule-at"]
+      ? {
+          schedule: {
+            at: opts["schedule-at"],
+            collection: opts.collection,
+            submit: opts["submit-scheduled"],
+          },
+        }
+      : {}),
     platforms: (
       opts.platforms ||
       (kind === "article"
@@ -128,6 +140,7 @@ export function summarizeJob(job) {
     createdAt,
     assetCount: job.assets?.length || 0,
     results,
+    ...(job.schedule ? { schedule: job.schedule } : {}),
     ...(targetUrl ? { targetUrl } : {}),
   };
 }
@@ -158,6 +171,9 @@ async function main() {
       console.log(
         "x-reply X_POST_URL --description-file reply.txt：把回复交给 Chrome 工作台审阅。",
       );
+    console.log(
+      "视频定时：--schedule-at 2026-11-19T07:00:00+08:00 --collection 人体的河流；--submit-scheduled 明确授权提交平台原生预约。",
+    );
     return;
   }
   if (command === "x-reply" && !X_REPLY_ENABLED)
@@ -202,13 +218,18 @@ async function main() {
         ),
       }),
     );
-  } else if (command === "draft" || command === "video")
+  } else if (command === "draft" || command === "video") {
+    const task = await importTask(
+      command === "draft" ? "article" : "video",
+      arg,
+      opts,
+    );
     result = await request(
       "/jobs",
       "POST",
-      await importTask(command === "draft" ? "article" : "video", arg, opts),
+      command === "video" && !opts.id ? { ...task, deduplicate: true } : task,
     );
-  else if (command === "status")
+  } else if (command === "status")
     result = await request("/jobs/" + encodeURIComponent(arg));
   else if (command === "list") result = await request("/jobs");
   else if (command === "retry" || command === "open") {

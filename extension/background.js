@@ -5,11 +5,18 @@ import {
   validateResult,
   forPlatform,
   retryable,
+  scheduleNeedsReview,
+  scheduleWindowIssue,
+  protectScheduleResult,
   TERMINAL,
   isAssist,
   ensurePlatform,
   safeUrl,
 } from "./shared/model.js";
+import {
+  NATIVE_SCHEDULE_CAPABILITY,
+  PLATFORM_SCHEDULE_CAPABILITIES,
+} from "./shared/platforms/index.js";
 import { matchPublished } from "./shared/published.js";
 import {
   platformForUrl,
@@ -96,13 +103,21 @@ async function runPlatform(task, platform, targetTab) {
   let tab;
   try {
     if (targetTab) assertTarget(task, await chrome.tabs.get(targetTab.id));
+    if (task.schedule) {
+      const issue = scheduleWindowIssue(platform, task.schedule.at);
+      if (issue) throw new Error(issue);
+    }
     await patch(task.id, platform, {
       state: "opening",
       message: "打开" + config.name,
     });
     const url =
       targetTab?.url || (await platformEditorUrl(platform, task.kind));
-    tab = targetTab || (await chrome.tabs.create({ url, active: false }));
+    // Both native date selectors and image previews use animation frames.
+    // Keep the one active scheduling tab visible until the platform responds.
+    tab =
+      targetTab ||
+      (await chrome.tabs.create({ url, active: Boolean(task.schedule) }));
     if (targetTab) {
       await chrome.tabs.update(tab.id, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
@@ -123,17 +138,29 @@ async function runPlatform(task, platform, targetTab) {
     });
     if (!response?.ok)
       throw new Error(response?.error || "平台适配器未返回结果");
-    const result = validateResult(response.result);
+    const current = await get("jobs", task.id);
+    const result = validateResult(
+      protectScheduleResult(current?.results[platform], response.result),
+    );
     await patch(task.id, platform, { ...result, tabId: tab.id });
   } catch (error) {
+    const current = await get("jobs", task.id);
+    const uncertain = current?.results[platform]?.state === "submitting";
     await patch(task.id, platform, {
-      state: "failed",
-      message: error.message,
+      state: uncertain ? "schedule_unconfirmed" : "failed",
+      message: uncertain
+        ? "定时提交结果不明，请先核对平台作品列表"
+        : error.message,
       tabId: tab?.id,
       editorUrl: tab?.url,
     });
   } finally {
     if (tab) activeTabs.delete(tab.id);
+    if (task.schedule?.submit && tab && !targetTab) {
+      const current = await get("jobs", task.id);
+      if (current?.results[platform]?.state === "scheduled")
+        await chrome.tabs.remove(tab.id).catch(() => {});
+    }
   }
 }
 async function setBadge(text) {
@@ -188,15 +215,29 @@ async function runTask(
       return;
     }
     let step = 0;
-    const directTotal = platforms.filter((p) => !isAssist(p)).length;
+    const runsDirectly = (platform) =>
+      !isAssist(platform) ||
+      (job.schedule && PLATFORMS[platform].schedule?.openEditor);
+    const directTotal = platforms.filter(runsDirectly).length;
     for (const p of platforms) {
       const current = await get("jobs", task.id);
+      const existingResult = current.results[p];
       if (
-        TERMINAL.has(current.results[p]?.state) &&
-        current.results[p].state === "draft_ready"
-      )
+        existingResult?.state === "draft_ready" ||
+        scheduleNeedsReview(existingResult)
+      ) {
+        if (existingResult.state === "submitting") {
+          const uncertain = protectScheduleResult(
+            existingResult,
+            existingResult,
+          );
+          await patch(current.id, p, uncertain);
+        } else if (bridgeJob) {
+          await bridgePatch(current, p, existingResult);
+        }
         continue;
-      if (isAssist(p)) {
+      }
+      if (!runsDirectly(p)) {
         if (
           current.results[p]?.state === "queued" ||
           retryable(current.results[p]) ||
@@ -215,7 +256,13 @@ async function runTask(
       await runPlatform(current, p);
     }
     await setBadge("");
-    if (step) notify("Omnipost", "填写已结束。请逐个页面检查，再自行发布。");
+    if (step)
+      notify(
+        "Omnipost",
+        task.schedule
+          ? "定时任务已处理，请核对各平台回执。"
+          : "填写已结束。请逐个页面检查，再自行发布。",
+      );
   } finally {
     processing = false;
     await announce();
@@ -317,7 +364,11 @@ async function connect(config) {
         type: "hello",
         token: config.token,
         worker: chrome.runtime.id,
-        capabilities: ["manual-stage"],
+        capabilities: [
+          "manual-stage",
+          NATIVE_SCHEDULE_CAPABILITY,
+          ...PLATFORM_SCHEDULE_CAPABILITIES,
+        ],
       }),
     );
   socket.onmessage = async (event) => {
@@ -532,7 +583,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (message.type === "CONTENT_STATUS") {
         if (
           message.platform !== active.platform ||
-          !["uploading", "filling", "saving"].includes(message.patch?.state)
+          !["uploading", "filling", "saving", "submitting"].includes(
+            message.patch?.state,
+          )
         )
           throw new Error("状态更新无效");
         await patch(j.id, active.platform, message.patch);
@@ -707,6 +760,19 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         bridge: { connected: bridgeOpen(), paired: Boolean(saved) },
       };
     }
+    if (message.type === "VIDEO_FINGERPRINTS") {
+      const config = await loadBridgeConfig();
+      if (!config) return { ok: true, fingerprints: [] };
+      const response = await fetch(
+        endpoint(config.url) + "/video-fingerprints",
+        {
+          headers: { Authorization: "Bearer " + config.token },
+        },
+      );
+      if (!response.ok) throw new Error("桥接未返回视频指纹");
+      const { fingerprints } = await response.json();
+      return { ok: true, fingerprints };
+    }
     if (message.type === "FILL_CURRENT") {
       if (processing) throw new Error("已有任务在运行");
       processing = true;
@@ -733,6 +799,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (processing) throw new Error("已有任务在运行");
       const j = await get("jobs", message.id);
       if (!j) throw new Error("任务不存在");
+      const existing = j.results[message.platform];
+      if (existing?.state === "draft_ready" || scheduleNeedsReview(existing))
+        throw new Error("该平台已有处理记录，请先检查原页面，避免重复上传");
       ensurePlatform(j, message.platform);
       await save(j);
       if (isAssist(message.platform)) {
@@ -991,9 +1060,11 @@ chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });
     let changed = false;
     for (const r of Object.values(j.results)) {
       if (!TERMINAL.has(r.state)) {
-        r.state = "needs_attention";
-        r.message =
-          "扩展曾中断，请先检查原页面；如需重新填充，请打开空白发布页后重试";
+        const uncertain = r.state === "submitting";
+        r.state = uncertain ? "schedule_unconfirmed" : "needs_attention";
+        r.message = uncertain
+          ? "定时提交结果不明，请先核对作品管理"
+          : "扩展曾中断，请先检查原页面；如需重新填充，请打开空白发布页后重试";
         changed = true;
       }
     }

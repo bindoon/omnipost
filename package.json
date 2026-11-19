@@ -45,6 +45,7 @@
     "format:check": "prettier --check extension bridge test cli.mjs build.mjs vite.config.mjs README.md docs"
   },
   "dependencies": {
+    "@noble/hashes": "2.0.1",
     "linkedom": "^0.18.15",
     "marked": "^15.0.12",
     "ws": "^8.18.0"
