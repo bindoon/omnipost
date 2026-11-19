@@ -99,6 +99,22 @@ node cli.mjs video '/绝对路径/视频.mp4' \
 
 `--stage` 仅把素材交给扩展，由侧栏填入当前发布页。`--overrides '/绝对路径/平台文案.json'` 可按平台指定 `title`、`description`、`tags`，定时任务可覆盖 `collection`，B 站也支持 `category`。
 
+### 用 USB 在 iPhone 上准备小红书视频
+
+先把视频传进 iPhone「照片」，用 USB 连接 Mac、解锁并保持屏幕亮着。打开小红书首页。如果已打开未选中素材的相册，可以加 `--picker`。填写视频缩略图上显示的时长，格式如 `0:03`。
+
+```sh
+node cli.mjs iphone --asset-label '0:03' --title '沿着城市的河岸' --description '今天拍下的河岸风景'
+```
+
+命令会启动本机 Appium 和已签名的 WebDriverAgent，选中当前相册画面中唯一匹配的视频，填写并回读文案，然后停在「发布笔记」页面。遇到同样时长的多个可见视频时会暂停。请先确认目标视频在相册当前画面中，最后在手机上核对并发布。
+
+新 Mac 先执行一次下方命令。需要 Xcode、符合 Appium 4 要求的 Node.js 版本（例如 24.15+ 的 24.x），以及可在 Xcode 中签名的 Apple 开发者团队。iPhone 首次运行需要开启开发者模式，并在「设置 → 通用 → VPN 与设备管理」信任对应开发者。签名到期后，下次启动会尝试通过 Xcode 续签。缓存和启动日志位于 `.local/iphone/`，或自定义 `OMNIPOST_HOME` 下的 `iphone/`。
+
+```sh
+node cli.mjs iphone setup --team-id YOUR_TEAM_ID
+```
+
 ### 写入视频原生定时
 
 把示例日期换成预约窗口内的实际日期。以下命令把素材和时间交给小红书原生发布页：
