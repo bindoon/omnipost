@@ -11,6 +11,9 @@ const rules = {
     /^\/creator-micro\/content\/publish\/?$/,
     /^\/content\/upload\/?$/,
   ],
+  isExistingWork: (url) =>
+    /^\/creator-micro\/content\/post\/video\/?$/.test(url.pathname) &&
+    url.searchParams.has("iid"),
   worksUrl: "https://creator.douyin.com/creator-micro/content/manage",
   caption: "视频 · 在发布页填充",
   automation: "assist",

@@ -82,7 +82,8 @@ export function pageRole(value) {
           url.searchParams.get("type") === "10" &&
           url.searchParams.get("isNew") === "1" &&
           !url.searchParams.has("appmsgid")
-        : (PLATFORMS[platform].editorPaths || []).some((re) =>
+        : !PLATFORMS[platform].isExistingWork?.(url) &&
+          (PLATFORMS[platform].editorPaths || []).some((re) =>
             re.test(url.pathname),
           );
   } catch {}

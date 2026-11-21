@@ -507,6 +507,50 @@ test("手动交接先 ready，之后原页执行状态能回传而不重新派�
   );
 });
 
+test("CLI 原预约换源传原作品 ID 并等待扩展的实际回执", async (t) => {
+  const { b, dir, req } = await fixture(t);
+  const { ws, next } = await worker(t, b, [
+    "manual-stage", "native-video-schedule", "scheduled-video-replacement",
+  ]);
+  const source = path.join(dir, "replacement.mp4");
+  const at = "2035-11-22T17:00:00+08:00";
+  const id = "stage-replacement";
+  const workId = "000000000000000000000001";
+  await fs.writeFile(source, "video");
+  const result = await req("/jobs", "POST", videoTask(id, source, 5, {
+    platforms: ["xiaohongshu"], delivery: "manual", schedule: { at },
+  }));
+  assert.equal(result.status, 201);
+  assert.equal((await next()).task.id, id);
+  ws.send(JSON.stringify({
+    type: "result", id, platform: "xiaohongshu", result: { state: "ready" },
+  }));
+  assert.equal((await next()).type, "ack");
+  assert.equal((await req(`/jobs/${id}/replace-video/xiaohongshu`, "POST", { workId: "unknown" })).status, 400);
+  assert.equal((await req(`/jobs/${id}/replace-video/bilibili`, "POST", { workId: "BV1rNs86mEGf" })).status, 409);
+  const cli = promisify(execFile)(process.execPath, [
+    new URL("../cli.mjs", import.meta.url).pathname,
+    "replace-video", id, "xiaohongshu", "--work-id", workId,
+  ], { env: { ...process.env, OMNIPOST_HOME: dir } });
+  const requested = await next();
+  assert.deepEqual(requested, {
+    type: "replace-video", id, platform: "xiaohongshu", workId,
+    at, requestId: requested.requestId,
+  });
+  assert.equal(
+    (await req(`/jobs/${id}/replace-video/xiaohongshu`, "POST", { workId })).status,
+    409,
+  );
+  ws.send(JSON.stringify({
+    type: "replace-video-result", requestId: requested.requestId, result: { ok: true },
+  }));
+  assert.deepEqual(JSON.parse((await cli).stdout), {
+    ok: true, state: "video_selected", persisted: false, id,
+    platform: "xiaohongshu", workId, scheduledAt: at,
+  });
+  assert.equal((await req(`/jobs/${id}`)).value.results.xiaohongshu.state, "ready");
+});
+
 test("旧扩展不能领取手动交接任务，但普通任务仍可派发", async (t) => {
   const { b, req } = await fixture(t);
   const { next } = await worker(t, b, []);
@@ -635,6 +679,65 @@ test("B 站无合集的定时填充等待理解该能力的扩展", async (t) =>
   });
   assert.deepEqual(task.overrides, data.overrides);
   assert.equal((await req("/health")).value.nativeBilibiliSchedule, true);
+});
+
+test("TikTok Studio 定时交接需要对应的扩展预填能力", async (t) => {
+  const { b, dir, req } = await fixture(t);
+  const capabilities = ["manual-stage", "native-video-schedule"];
+  const earlier = await worker(t, b, capabilities);
+  const filePath = path.join(dir, "studio.mp4");
+  await fs.writeFile(filePath, "video");
+  const data = {
+    id: "studio-schedule",
+    kind: "video",
+    title: "这是一条视频",
+    platforms: ["tiktok"],
+    delivery: "manual",
+    assets: [
+      {
+        id: "v",
+        role: "video",
+        name: "studio.mp4",
+        type: "video/mp4",
+        filePath,
+        size: 5,
+      },
+    ],
+    schedule: { at: "2035-11-20T07:00:00+08:00" },
+  };
+  assert.equal((await req("/jobs", "POST", data)).status, 201);
+  assert.equal(
+    (await req("/jobs/studio-schedule")).value.results.tiktok.state,
+    "queued",
+  );
+  assert.equal(
+    (await req("/health")).value.nativeTikTokSchedulePreparation,
+    false,
+  );
+  const denied = await req("/jobs", "POST", {
+    ...data,
+    id: "studio-forbidden-submit",
+    schedule: { ...data.schedule, submit: true },
+  });
+  assert.equal(denied.status, 400);
+  assert.match(denied.value.error, /原页面确认提交/);
+  earlier.ws.close();
+  await until(async () => !(await req("/health")).value.connected);
+  const updated = await worker(t, b, [
+    ...capabilities,
+    "native-tiktok-schedule-preparation",
+  ]);
+  const { task } = await updated.next();
+  assert.equal(task.delivery, "manual");
+  assert.deepEqual(task.schedule, {
+    ...data.schedule,
+    collection: "",
+    submit: false,
+  });
+  assert.equal(
+    (await req("/health")).value.nativeTikTokSchedulePreparation,
+    true,
+  );
 });
 
 test("删除交接记录时保留源文件", async (t) => {

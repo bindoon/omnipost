@@ -19,6 +19,12 @@ import {
 } from "./shared/platforms/index.js";
 import { matchPublished } from "./shared/published.js";
 import {
+  VIDEO_REPLACEMENT_CAPABILITY,
+  replacementAsset,
+  replacementPlatform,
+  replacementTarget,
+} from "./shared/video-replacement.js";
+import {
   platformForUrl,
   assertTarget,
   surfaceFor,
@@ -70,14 +76,48 @@ async function patch(id, platform, data) {
     });
   await queue;
 }
-async function waitTab(tabId) {
+async function waitTab(tabId, editorPlatform) {
   const started = Date.now();
   while (Date.now() - started < 60000) {
     const tab = await chrome.tabs.get(tabId);
-    if (tab.status === "complete") return;
-    await new Promise((r) => setTimeout(r, 300));
+    if (tab.status === "complete") {
+      if (!editorPlatform) return { tab };
+      if (tab.url && tab.url !== "about:blank" && !tab.pendingUrl) {
+        const page = pageRole(tab.url);
+        if (page.platform !== editorPlatform || page.role !== "editor")
+          throw new Error(
+            "当前页面不是" + PLATFORMS[editorPlatform].name + "的新建投稿页",
+          );
+        const frame = await chrome.webNavigation.getFrame({
+          tabId,
+          frameId: 0,
+        });
+        if (frame?.errorOccurred) throw new Error("平台投稿页加载失败");
+        if (frame?.documentId && frame.url === tab.url)
+          return { tab, documentId: frame.documentId };
+      }
+    }
+    await sleep(300);
   }
   throw new Error("平台页面加载超时");
+}
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(label + "超时(" + ms / 1000 + "s)")), ms),
+    ),
+  ]);
+}
+// 视频号的发布表单挂在 micro/content/post/create 的子 iframe 里；
+// 上传控件可能挂在别的 frame：优先找含 video accept 的 file input，
+// 其次找带表单特征（描述/短标题）的 frame，再退回表单 iframe。
+async function editorFrameId(tabId, platform) {
+  if (platform === "tiktok") return { frameId: 0 };
+  // channels：runner 在主 frame 运行，经同源 contentDocument 访问
+  // post-card / micro iframe 完成引导与填表（runner.channelsAllDocs）。
+  if (platform !== "channels") return undefined;
+  return { frameId: 0, diag: "main-frame routing" };
 }
 async function platformEditorUrl(platform, kind, tabId) {
   if (platform === "youtube") {
@@ -113,11 +153,27 @@ async function runPlatform(task, platform, targetTab) {
     });
     const url =
       targetTab?.url || (await platformEditorUrl(platform, task.kind));
+    // 防御：历史运行会遗留发布页标签页，堆积后拖慢甚至阻塞开页。
+    // 新任务开始前清掉同平台的遗留编辑页。
+    if (!targetTab) {
+      const stale = await chrome.tabs
+        .query({ url: new URL(url).origin + "/*" })
+        .catch(() => []);
+      const staleIds = stale
+        .filter((t) => t.id && t.url?.includes("/platform"))
+        .map((t) => t.id);
+      if (staleIds.length)
+        await chrome.tabs.remove(staleIds).catch(() => {});
+    }
     // Both native date selectors and image previews use animation frames.
     // Keep the one active scheduling tab visible until the platform responds.
     tab =
       targetTab ||
-      (await chrome.tabs.create({ url, active: Boolean(task.schedule) }));
+      (await withTimeout(
+        chrome.tabs.create({ url, active: Boolean(task.schedule) }),
+        30000,
+        "打开平台标签页",
+      ));
     if (targetTab) {
       await chrome.tabs.update(tab.id, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
@@ -125,17 +181,44 @@ async function runPlatform(task, platform, targetTab) {
     activeTabs.set(tab.id, { id: task.id, platform });
     await patch(task.id, platform, {
       tabId: tab.id,
-      editorUrl: tab.url || url,
+      editorUrl: platform === "douyin" ? url : tab.url || url,
     });
-    await waitTab(tab.id);
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content/runner.js"],
-    });
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: "RUN_DRAFT",
-      task: { ...forPlatform(task, platform), fillOnly: Boolean(targetTab) },
-    });
+    const requiresEditorDocument =
+      platform === "douyin" || platform === "xiaohongshu";
+    const ready = await waitTab(
+      tab.id,
+      requiresEditorDocument ? platform : undefined,
+    );
+    tab = ready.tab;
+    await withTimeout(
+      chrome.scripting.executeScript({
+        target: ready.documentId
+          ? { tabId: tab.id, documentIds: [ready.documentId] }
+          : { tabId: tab.id, allFrames: true },
+        files: ["content/runner.js"],
+      }),
+      20000,
+      "注入内容脚本",
+    );
+    const target = await editorFrameId(tab.id, platform);
+    if (target?.diag)
+      await patch(task.id, platform, {
+        message: "定位表单 frame：" + target.diag.slice(0, 200),
+      });
+    // Pin both operations to the same document. A navigation after injection
+    // must fail this send, rather than delivering it to the next editor.
+    const messageTarget = ready.documentId
+      ? { documentId: ready.documentId }
+      : {};
+    if (target?.frameId !== undefined) messageTarget.frameId = target.frameId;
+    const response = await chrome.tabs.sendMessage(
+      tab.id,
+      {
+        type: "RUN_DRAFT",
+        task: { ...forPlatform(task, platform), fillOnly: Boolean(targetTab) },
+      },
+      messageTarget,
+    );
     if (!response?.ok)
       throw new Error(response?.error || "平台适配器未返回结果");
     const current = await get("jobs", task.id);
@@ -152,7 +235,7 @@ async function runPlatform(task, platform, targetTab) {
         ? "定时提交结果不明，请先核对平台作品列表"
         : error.message,
       tabId: tab?.id,
-      editorUrl: tab?.url,
+      editorUrl: current?.results[platform]?.editorUrl || tab?.url,
     });
   } finally {
     if (tab) activeTabs.delete(tab.id);
@@ -186,13 +269,15 @@ async function runTask(
   processing = true;
   try {
     let existing = await get("jobs", task.id);
-    const job = existing || {
-      ...validateTask(task),
-      bridgeJob,
-      results: initialResults(task),
-    };
     if (existing && existing.kind !== task.kind)
       throw new Error("任务 ID 冲突");
+    // 重新推送的桥接任务素材 ID 会变化，必须用新任务内容刷新本地缓存，
+    // 只保留各平台已有的结果状态。
+    const job = {
+      ...validateTask(task),
+      bridgeJob,
+      results: existing?.results || initialResults(task),
+    };
     await save(job);
     if (job.delivery === "manual") {
       for (const p of platforms) {
@@ -344,6 +429,58 @@ async function bridgeAssetChunk(config, jobId, assetId, index) {
     return run();
   }
 }
+async function replaceVideoInTab(id, tabId, url, expected) {
+  if (processing) throw new Error("已有任务在运行");
+  processing = true;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+    const target = replacementTarget(tab.url);
+    if (
+      !target || url !== tab.url ||
+      (expected && (expected.platform !== target.platform || expected.workId !== target.workId))
+    )
+      throw new Error("请在已核对的原预约编辑页使用换源");
+    const job = await get("jobs", id);
+    const { platform } = target;
+    const asset = replacementAsset(job, platform);
+    if (!asset || (expected && expected.at !== job.schedule.at))
+      throw new Error("请交接一条同平台、同定时时间的替换视频");
+    if (job.bridgeJob && !(await loadBridgeConfig()))
+      throw new Error("请先连接本机桥接读取替换视频");
+    activeTabs.set(tab.id, { id: job.id, platform, replacementAsset: asset.id });
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["content/replacement.js"],
+    });
+    const result = await chrome.tabs.sendMessage(tab.id, {
+      type: "UPLOAD_REPLACEMENT_VIDEO",
+      task: {
+        id: job.id,
+        url: tab.url,
+        platform,
+        title: job.overrides?.[platform]?.title ?? job.title,
+        at: job.schedule.at,
+        asset,
+      },
+    });
+    if (!result?.ok) throw new Error(result?.error || "原稿未接收替换视频");
+    return { ok: true };
+  } finally {
+    if (tab) activeTabs.delete(tab.id);
+    processing = false;
+  }
+}
+async function replaceOpenVideo(request) {
+  const tabs = (await chrome.tabs.query({})).filter((tab) => {
+    const target = replacementTarget(tab.url);
+    return target?.platform === request.platform && target.workId === request.workId;
+  });
+  if (tabs.length !== 1) {
+    throw new Error(tabs.length ? "同一原稿打开了多个标签页" : "未打开指定作品的原预约编辑页");
+  }
+  return replaceVideoInTab(request.id, tabs[0].id, tabs[0].url, request);
+}
 async function connect(config) {
   const root = endpoint(config.url);
   if (!/^[a-f0-9]{64}$/.test(config.token))
@@ -366,6 +503,8 @@ async function connect(config) {
         worker: chrome.runtime.id,
         capabilities: [
           "manual-stage",
+          "build-20261120-5",
+          VIDEO_REPLACEMENT_CAPABILITY,
           NATIVE_SCHEDULE_CAPABILITY,
           ...PLATFORM_SCHEDULE_CAPABILITIES,
         ],
@@ -386,7 +525,25 @@ async function connect(config) {
         await announce();
       }
       if (m.type === "task") {
-        const task = validateTask(m.task);
+        let task;
+        try {
+          task = validateTask(m.task);
+        } catch (error) {
+          for (const p of m.task?.platforms || [])
+            current.send(
+              JSON.stringify({
+                type: "result",
+                id: m.task?.id,
+                platform: p,
+                result: {
+                  state: "failed",
+                  persisted: false,
+                  message: "任务校验失败：" + error.message,
+                },
+              }),
+            );
+          return;
+        }
         if (processing) {
           for (const p of task.platforms)
             current.send(
@@ -396,15 +553,47 @@ async function connect(config) {
                 platform: p,
                 result: {
                   state: "needs_attention",
+                  persisted: false,
                   message: "工作台正在处理其他任务，请完成后重试",
                 },
               }),
             );
           return;
         }
-        runTask(task, { bridgeJob: true }).catch(console.error);
+        runTask(task, { bridgeJob: true }).catch(async (error) => {
+          console.error(error);
+          for (const p of task.platforms)
+            current.send(
+              JSON.stringify({
+                type: "result",
+                id: task.id,
+                platform: p,
+                result: {
+                  state: "failed",
+                  persisted: false,
+                  message:
+                    "扩展执行中断：" +
+                    (error?.message || String(error)).slice(0, 200),
+                },
+              }),
+            );
+        });
       }
       if (m.type === "open") await openDraft(m.id, m.platform);
+      if (m.type === "replace-video") {
+        let result;
+        try {
+          result = await replaceOpenVideo(m);
+        } catch (error) {
+          result = { ok: false, error: error.message };
+        }
+        if (current.readyState === WebSocket.OPEN)
+          current.send(JSON.stringify({
+            type: "replace-video-result",
+            requestId: m.requestId,
+            result,
+          }));
+      }
       if (m.type === "error") {
         await chrome.storage.local.set({ bridgeError: m.message });
         await announce();
@@ -575,7 +764,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (
         !active ||
         active.id !== message.id ||
-        sender.id !== chrome.runtime.id
+        sender.id !== chrome.runtime.id ||
+        (active.replacementAsset &&
+          (message.type !== "ASSET" || message.assetId !== active.replacementAsset))
       )
         throw new Error("页面无权读取此任务");
       const j = await get("jobs", message.id);
@@ -863,7 +1054,17 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     }
     if (message.type === "TARGET") {
       const tab = await chrome.tabs.get(message.tabId);
-      return { ok: true, target: { id: tab.id, ...pageRole(tab.url) } };
+      return {
+        ok: true,
+        target: {
+          id: tab.id,
+          ...pageRole(tab.url),
+          ...(replacementPlatform(tab.url) ? { replacement: true } : {}),
+        },
+      };
+    }
+    if (message.type === "REPLACE_VIDEO") {
+      return replaceVideoInTab(message.id, message.tabId, message.url);
     }
     if (message.type === "PLACE_COVER" || message.type === "ARM_COVER") {
       if (processing) throw new Error("正在填入页面，完成后再放入封面");

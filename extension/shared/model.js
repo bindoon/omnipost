@@ -178,7 +178,7 @@ function scheduleSettings(input, platforms) {
     input.kind !== "video" ||
     platforms.some((platform) => !PLATFORMS[platform]?.schedule)
   )
-    throw new Error("视频定时目前支持小红书、视频号、抖音和 B 站");
+    throw new Error("所选内容或平台暂不支持原生定时");
   const at = nativeScheduleTime(input.schedule.at);
   const collection = String(input.schedule.collection || "").trim();
   const submit = input.schedule.submit === true;

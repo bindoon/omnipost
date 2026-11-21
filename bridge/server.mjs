@@ -19,6 +19,11 @@ import {
   NATIVE_SCHEDULE_CAPABILITY,
   PLATFORMS,
 } from "../extension/shared/platforms/index.js";
+import {
+  VIDEO_REPLACEMENT_CAPABILITY,
+  replacementAsset,
+  validReplacementWorkId,
+} from "../extension/shared/video-replacement.js";
 const CHUNK = 1024 ** 2;
 const equal = (a, b) => {
   if (typeof a !== "string") return false;
@@ -128,6 +133,7 @@ export async function startBridge({
   let workerCapabilities = [];
   let worker = null,
     active = null,
+    replacing = null,
     closing = false,
     seenAt = 0,
     persistence = Promise.resolve();
@@ -205,8 +211,35 @@ export async function startBridge({
       })
     );
   }
+  async function requestVideoReplacement(job, platform, workId) {
+    const assigned = worker;
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve) => {
+      const finish = (result) => {
+        if (replacing?.requestId !== requestId) return;
+        clearTimeout(timeout);
+        replacing = null;
+        resolve(result);
+      };
+      const timeout = setTimeout(
+        () => finish({ ok: false, error: "换源回执等待超时，请先核对原稿", uncertain: true }),
+        120000,
+      );
+      replacing = { assigned, requestId, jobId: job.id, finish };
+      assigned.send(JSON.stringify({
+        type: "replace-video",
+        requestId,
+        id: job.id,
+        platform,
+        workId,
+        at: job.schedule.at,
+      }), (error) => {
+        if (error) finish({ ok: false, error: "未能联系扩展，请先核对原稿", uncertain: true });
+      });
+    });
+  }
   async function dispatch() {
-    if (!worker || worker.readyState !== WebSocket.OPEN || active || closing)
+    if (!worker || worker.readyState !== WebSocket.OPEN || active || replacing || closing)
       return;
     const j = [...jobs.values()].find(
       (j) =>
@@ -226,6 +259,9 @@ export async function startBridge({
         updatedAt: new Date().toISOString(),
       };
     await save(j);
+    console.log(
+      `[bridge] ${new Date().toISOString()} dispatch ${j.id} -> worker, platforms=${platforms.join(",")}`,
+    );
     if (worker === assigned && worker.readyState === WebSocket.OPEN)
       worker.send(
         JSON.stringify({
@@ -291,6 +327,12 @@ export async function startBridge({
           nativeBilibiliSchedule:
             Boolean(worker) &&
             workerCapabilities.includes(PLATFORMS.bilibili.schedule.capability),
+          nativeTikTokSchedulePreparation:
+            Boolean(worker) &&
+            workerCapabilities.includes(PLATFORMS.tiktok.schedule.capability),
+          scheduledVideoReplacement:
+            Boolean(worker) &&
+            workerCapabilities.includes(VIDEO_REPLACEMENT_CAPABILITY),
           pending: [...jobs.values()].filter((j) => !done(j)).length,
         });
       if (!equal(req.headers.authorization || "", "Bearer " + config.token))
@@ -375,7 +417,7 @@ export async function startBridge({
         return;
       }
       const match =
-        /^\/jobs\/([\w-]+)(?:\/(assets|retry|open)(?:\/([\w-]+))?)?$/.exec(
+        /^\/jobs\/([\w-]+)(?:\/(assets|retry|open|replace-video)(?:\/([\w-]+))?)?$/.exec(
           url.pathname,
         );
       if (!match) return reply(res, 404, { error: "Not found" });
@@ -384,7 +426,7 @@ export async function startBridge({
       if (!j) return reply(res, 404, { error: "Job not found" });
       if (!action && req.method === "GET") return reply(res, 200, view(j));
       if (!action && req.method === "DELETE") {
-        if (active === j.id)
+        if (active === j.id || replacing?.jobId === j.id)
           return reply(res, 409, {
             error: "这条草稿正在交接，完成后再删除",
           });
@@ -447,6 +489,30 @@ export async function startBridge({
         worker.send(JSON.stringify({ type: "open", id, platform: key }));
         return reply(res, 200, { ok: true });
       }
+      if (action === "replace-video" && req.method === "POST") {
+        const { workId } = await body(req);
+        if (!validReplacementWorkId(key, workId))
+          return reply(res, 400, { error: "请提供该平台的有效原作品 ID" });
+        if (!replacementAsset(j, key) || j.results[key]?.state !== "ready")
+          return reply(res, 409, { error: "请先交接仍在定时时段内的同平台替换视频" });
+        if (!worker || worker.readyState !== WebSocket.OPEN ||
+            !workerCapabilities.includes(VIDEO_REPLACEMENT_CAPABILITY))
+          return reply(res, 409, { error: "请连接支持原预约换源的新版 Chrome 扩展" });
+        if (active || replacing)
+          return reply(res, 409, { error: "已有任务在运行" });
+        const result = await requestVideoReplacement(j, key, workId);
+        dispatch().catch(() => {});
+        if (!result.ok) return reply(res, result.uncertain ? 504 : 409, result);
+        return reply(res, 200, {
+          ok: true,
+          state: "video_selected",
+          persisted: false,
+          id: j.id,
+          platform: key,
+          workId,
+          scheduledAt: j.schedule.at,
+        });
+      }
       reply(res, 404, { error: "Not found" });
     } catch (e) {
       reply(res, 400, { error: e.message });
@@ -507,13 +573,28 @@ export async function startBridge({
                 ? m.capabilities
                 : [];
               ws.send(JSON.stringify({ type: "hello", ok: true }));
+              console.log(
+                `[bridge] ${new Date().toISOString()} worker hello, id=${m.worker || "?"}, capabilities=${(m.capabilities || []).join(",")}`,
+              );
               await dispatch();
             });
             return;
           }
           seenAt = Date.now();
+          if (m.type !== "ping" && m.type !== "pong")
+            console.log(
+              `[bridge] ${new Date().toISOString()} worker message type=${m.type} id=${m.id || ""} platform=${m.platform || ""} state=${m.result?.state || ""}`,
+            );
           if (m.type === "ping") {
             ws.send(JSON.stringify({ type: "pong" }));
+            return;
+          }
+          if (m.type === "replace-video-result") {
+            if (replacing?.assigned === ws && replacing.requestId === m.requestId) {
+              replacing.finish(m.result?.ok === true
+                ? { ok: true }
+                : { ok: false, error: String(m.result?.error || "原稿未接收替换视频").slice(0, 200) });
+            }
             return;
           }
           if (m.type === "result") {
@@ -582,6 +663,8 @@ export async function startBridge({
     });
     ws.on("close", () => {
       clearTimeout(timer);
+      if (replacing?.assigned === ws)
+        replacing.finish({ ok: false, error: "扩展连接中断，请先核对原稿", uncertain: true });
       if (worker !== ws) return;
       worker = null;
       const id = active;

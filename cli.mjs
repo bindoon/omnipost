@@ -169,7 +169,7 @@ async function main() {
   }
   if (!command || command === "help") {
     console.log(
-      "omnipost serve | pair | doctor | draft file.md --platforms wechat,xiaohongshu,x | video file.mp4 --title 标题 --platforms xiaohongshu,x,channels,douyin,bilibili,youtube,instagram | status ID | list | retry ID PLATFORM | open ID PLATFORM | iphone --help\n--stage 仅交接到插件，等待当前页填充。--cover-landscape / --cover-portrait 保存横竖封面。默认只生成草稿。--overrides JSON 可逐平台调整 title/description/tags。小红书、抖音、视频号正文不要放链接或微信号。--full 输出完整任务。",
+      "omnipost serve | pair | doctor | draft file.md --platforms wechat,xiaohongshu,x | video file.mp4 --title 标题 --platforms xiaohongshu,x,channels,douyin,bilibili,youtube,instagram,tiktok | status ID | list | retry ID PLATFORM | open ID PLATFORM | iphone --help\n--stage 仅交接到插件，等待当前页填充。--cover-landscape / --cover-portrait 保存横竖封面。默认只生成草稿。--overrides JSON 可逐平台调整 title/description/tags。小红书、抖音、视频号正文不要放链接或微信号。--full 输出完整任务。",
     );
     if (X_REPLY_ENABLED)
       console.log(
@@ -178,6 +178,10 @@ async function main() {
     console.log(
       "视频定时：--schedule-at 2026-11-19T07:00:00+08:00 --collection 人体的河流；--submit-scheduled 明确授权提交平台原生预约。",
     );
+    console.log(
+      "TikTok Studio：用 --platforms tiktok --stage --schedule-at 交接到上传页预填，在原页面核对并提交。",
+    );
+    console.log("原预约换源：replace-video ID PLATFORM --work-id 原作品ID（小红书或 B 站）");
     return;
   }
   if (command === "x-reply" && !X_REPLY_ENABLED)
@@ -236,6 +240,15 @@ async function main() {
   } else if (command === "status")
     result = await request("/jobs/" + encodeURIComponent(arg));
   else if (command === "list") result = await request("/jobs");
+  else if (command === "replace-video") {
+    if (!arg || !platform || !opts["work-id"])
+      throw new Error("需要交接任务 ID、平台和 --work-id 原作品 ID");
+    result = await request(
+      "/jobs/" + encodeURIComponent(arg) + "/replace-video/" + encodeURIComponent(platform),
+      "POST",
+      { workId: opts["work-id"] },
+    );
+  }
   else if (command === "retry" || command === "open") {
     if (!arg || !platform) throw new Error("需要任务ID和平台");
     result = await request(

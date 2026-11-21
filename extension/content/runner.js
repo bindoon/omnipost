@@ -4,11 +4,41 @@ import {
   tagNames,
   topicNames as hashTopics,
 } from "../shared/model.js";
+import { pageRole } from "../shared/target.js";
 
 (() => {
   if (globalThis.__OMNIPOST__) return;
   globalThis.__OMNIPOST__ = true;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 视频号表单在 micro/content/post/create 的子 iframe 里；RUN_DRAFT 可能
+  // 被派到主 frame。docOverride 指向真正承载表单的 document，使所有以
+  // D() 为默认根的查询都落到表单文档上。
+  let docOverride = null;
+  function D() {
+    return docOverride || document;
+  }
+  // 视频号诱饵：真实表单在 shadow DOM 里的 micro iframe 中，旧版 background
+  // 的 frame 探测（file input / 表单特征）找不到它，会把任务误发给空壳
+  // micro frame（SPA 路由中随时被销毁）。主 frame 是唯一稳定执行环境，
+  // 这里预置隐藏诱饵让探测固定选中主 frame，由主 frame 的 runner 接管全流程。
+  try {
+    if (
+      window.top === window &&
+      location.origin === "https://channels.weixin.qq.com" &&
+      location.pathname === "/platform/post/create" &&
+      !document.getElementById("__omnipost_decoy__")
+    ) {
+      const box = document.createElement("div");
+      box.id = "__omnipost_decoy__";
+      box.style.cssText =
+        "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;";
+      box.innerHTML =
+        '<input type="file" accept="video/mp4,video/*" aria-hidden="true" tabindex="-1">' +
+        '<div data-placeholder="添加描述"></div>' +
+        '<input placeholder="短标题，概括一下最有信息量的部分">';
+      (document.body || document.documentElement).appendChild(box);
+    }
+  } catch {}
   const norm = (s) =>
     String(s || "")
       .replace(/\s+/g, " ")
@@ -38,7 +68,7 @@ import {
     }
     attention(message);
   }
-  function exact(texts, root = document) {
+  function exact(texts, root = D()) {
     const names = Array.isArray(texts) ? texts : [texts];
     const roots = [root];
     for (const host of root.querySelectorAll("xhs-publish-btn")) {
@@ -74,10 +104,10 @@ import {
     el.scrollIntoView({ block: "center" });
     el.click();
   }
-  async function clickText(names, root = document) {
+  async function clickText(names, root = D()) {
     click(await wait(() => exact(names, root), "未找到平台操作：" + names));
   }
-  function field(selector, root = document) {
+  function field(selector, root = D()) {
     return [...root.querySelectorAll(selector)].find(visible);
   }
   function textField(el, value) {
@@ -261,12 +291,135 @@ import {
       )
     );
   }
+  // 视频号：直接打开 /platform/post/create 时 micro 表单 iframe 是空壳，
+  // 必须在首页 post-card 里点「发表视频」才会挂载真实表单。
+  // micro iframe 藏在 shadow DOM 里：定位一律走 queryAll（已穿透
+  // shadowRoot 与嵌套 iframe），不要用裸 querySelectorAll。
+  const isDecoy = (el) => Boolean(el?.closest?.("#__omnipost_decoy__"));
+  function channelsFormDoc() {
+    for (const f of queryAll("iframe", window.top?.document || document)) {
+      try {
+        const doc = f.contentDocument;
+        if (doc?.body && /定时发表/.test(doc.body.innerText || "")) return doc;
+      } catch {}
+    }
+    return null;
+  }
+  // 「发表视频」按钮位于首页的 post-card iframe 里（submit.mjs 已验证）。
+  function channelsFindPublish() {
+    const hits = queryAll("button", window.top?.document || document).filter(
+      (b) => !isDecoy(b) && (b.textContent || "").trim().includes("发表视频"),
+    );
+    return (
+      hits.sort((a, b) => a.childElementCount - b.childElementCount)[0] || null
+    );
+  }
+  async function bootstrapChannelsEditor(task) {
+    const mounted = await wait(channelsFormDoc, "", 8000).catch(() => null);
+    if (mounted) return mounted;
+    const diag = async (msg) => {
+      try {
+        await status(task, "filling", "引导: " + msg);
+      } catch {}
+    };
+    const top =
+      window.top && window.top !== window ? window.top.document : document;
+    await diag(
+      "topFrame=" +
+        (window.top === window) +
+        " self=" +
+        location.pathname.slice(-30),
+    );
+    let publish = await wait(channelsFindPublish, "", 10000).catch(() => null);
+    if (!publish) {
+      // 不在首页：点侧边栏「首页」做 SPA 路由跳转（候选取前 2 个，
+      // 每个候选沿祖先链逐层触发完整指针事件，覆盖监听在任意层级的情况）
+      const fire = (el) => {
+        for (const type of [
+          "pointerdown",
+          "mousedown",
+          "pointerup",
+          "mouseup",
+          "click",
+        ])
+          try {
+            el.dispatchEvent(
+              new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                view: top,
+                button: 0,
+              }),
+            );
+          } catch {}
+      };
+      const navs = queryAll("a,span,div,li,[role=menuitem]", top)
+        .filter((el) => visible(el) && norm(el.textContent) === "首页")
+        .sort(
+          (a, b) =>
+            a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+        )
+        .slice(0, 2);
+      if (!navs.length)
+        attention("未找到「首页」导航，无法引导挂载视频号表单");
+      const before = top.location.pathname;
+      outer: for (const nav of navs) {
+        let node = nav;
+        for (let i = 0; i < 6 && node && node !== top.body; i++) {
+          await diag("点击首页导航 #" + i + " " + node.tagName);
+          fire(node);
+          const moved = await wait(
+            () => top.location.pathname !== before,
+            "",
+            5000,
+          ).catch(() => false);
+          if (moved) break outer;
+          node = node.parentElement;
+        }
+      }
+      if (top.location.pathname === before)
+        attention(
+          "点击「首页」未发生路由跳转（" + before + "），无法引导挂载表单",
+        );
+      publish = await wait(
+        channelsFindPublish,
+        "首页未出现「发表视频」入口（post-card）",
+        30000,
+      ).catch(() => null);
+      if (!publish)
+        await diag(
+          "首页点击后 href=" + top.location.pathname.slice(-30),
+        );
+    }
+    if (!publish) return channelsFormDoc();
+    await diag("点击「发表视频」");
+    publish.click();
+    return wait(channelsFormDoc, "点击「发表视频」后表单未挂载", 90000).catch(
+      () => null,
+    );
+  }
   async function fillChannelsCopy(task, timeout = 300000) {
     const desc = await wait(
       () => channelsDescription(),
       "未找到视频号视频描述",
       timeout,
-    );
+    ).catch(async (error) => {
+      const micro = (D().body?.innerText || "").replace(/\s+/g, " ").slice(0, 220);
+      const topText = (
+        (window.top && window.top !== window
+          ? window.top.document.body?.innerText
+          : document.body?.innerText) || ""
+      )
+        .replace(/\s+/g, " ")
+        .slice(0, 220);
+      attention(
+        error.message +
+          " | micro=" +
+          micro +
+          " | top=" +
+          topText,
+      );
+    });
     const raw = task.description || task.title || "";
     const topics = hashTopics(raw);
     const body = raw.replace(/(?:^|\s)(?:#[^\s#]+[ \t]*)+$/g, "").trim();
@@ -429,7 +582,7 @@ import {
       return null;
     }
   }
-  function queryAll(selector, start = document) {
+  function queryAll(selector, start = D()) {
     const out = [];
     const seen = new Set();
     const visit = (root) => {
@@ -477,7 +630,7 @@ import {
       null
     );
   }
-  function inputFor(kind, root = document) {
+  function inputFor(kind, root = D()) {
     const pattern = new RegExp(
       kind === "video" ? "video|mp4|mov" : "image|png|jpg|jpeg|webp",
       "i",
@@ -585,17 +738,24 @@ import {
       note(task, PLATFORMS[task.platform].name + "只处理前 " + cap + " 个话题");
   }
   async function waitUploadIdle() {
-    const busy = () => /上传中|正在上传|转码中/.test(document.body.innerText);
+    const busy = () =>
+      /上传中|正在上传|转码中/.test(D().body.innerText);
     if (!busy()) return;
-    await wait(
-      () =>
-        !busy() &&
-        /上传完成|上传成功|已上传|处理完成|转码完成/.test(
-          document.body.innerText,
-        ),
-      "视频仍在上传，封面要等上传完成后再设置",
-      300000,
-    );
+    try {
+      await wait(
+        () =>
+          !busy() &&
+          /上传完成|上传成功|已上传|处理完成|转码完成/.test(
+            D().body.innerText,
+          ),
+        "视频仍在上传，封面要等上传完成后再设置",
+        300000,
+      );
+    } catch (error) {
+      if (!error?.needsAttention) throw error;
+      // 部分平台完成后不显示成功文案：确认忙碌状态稳定解除即可。
+      await wait(() => !busy(), "视频仍在上传，请稍后再试", 90000);
+    }
   }
   function result(task, evidence, draftUrl = location.href) {
     return {
@@ -1073,7 +1233,7 @@ import {
     }
     return null;
   }
-  function controlByText(texts, root = document) {
+  function controlByText(texts, root = D()) {
     const names = Array.isArray(texts) ? texts : [texts];
     const hit = exact(names, root);
     if (hit) return hit;
@@ -1234,7 +1394,24 @@ import {
     const directEdit = exact(["直接编辑"]);
     if (directEdit) click(directEdit);
     const dialog = await wait(
-      () => coverDialog(),
+      () =>
+        coverDialog() ||
+        // 视频号封面对话框的可见性判定可能失真：兜底按文本特征找
+        (task.platform === "channels" &&
+          queryAll("div,section,[role=dialog]")
+            .filter((el) => {
+              const text = norm(el.textContent);
+              return (
+                text.length < 1500 &&
+                /上传封面|上传图片/.test(text) &&
+                /完成|确认|确定/.test(text)
+              );
+            })
+            .sort(
+              (a, b) =>
+                a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+            )[0]) ||
+        null,
       "封面编辑窗口没有打开",
       8000,
     );
@@ -1294,16 +1471,45 @@ import {
   }
   async function finishCoverDialog(task, dialog) {
     const openDialog = () => coverDialog() || dialog;
+    const enabled = (control) =>
+      control &&
+      !control.disabled &&
+      control.getAttribute("aria-disabled") !== "true";
     const done = await wait(
       () => {
-        const enabled = (control) =>
-          control &&
-          !control.disabled &&
-          control.getAttribute("aria-disabled") !== "true";
-        const control = controlByText(["完成", "确认", "确定"], openDialog());
-        if (enabled(control)) return control;
+        const dlg = openDialog();
+        if (!dlg?.querySelectorAll) return null;
+        // 同名控件可能有多个（含隐藏模板/禁用态）：逐个名称枚举，
+        // 取第一个可用的最小元素，避免被单个禁用命中卡死。
+        for (const name of [
+          "完成",
+          "确认",
+          "确定",
+          "保存",
+          "使用封面",
+          "确认使用",
+          "使用",
+        ]) {
+          // 不做 visible 过滤：该弹窗内按钮的可见性判定会失真（跨文档坐标），
+          // 以「文字前缀 + 可用」为准，.click() 对隐藏元素同样生效。
+          const hits = queryAll("button,[role=button],a,span,div", dlg)
+            .filter(
+              (el) =>
+                !isDecoy(el) &&
+                norm(el.textContent).replace(/^\+\s*/, "").startsWith(name),
+            )
+            .map((el) => el.closest("button,[role=button],a") || el)
+            .filter(enabled);
+          if (hits.length) {
+            const pick = hits.sort(
+              (a, b) =>
+                a.querySelectorAll("*").length - b.querySelectorAll("*").length,
+            )[0];
+            if (pick) return pick;
+          }
+        }
         if (task.platform === "xiaohongshu" && controlByText("裁剪")) {
-          const candidates = exactLeaves(document, "完成")
+          const candidates = exactLeaves(D(), "完成")
             .map((el) => el.closest('button,[role="button"]') || el)
             .filter(enabled);
           if (candidates.length === 1) return candidates[0];
@@ -1311,8 +1517,32 @@ import {
         return null;
       },
       "封面已选择，但窗口里的确认按钮仍不可用",
-      8000,
-    );
+      45000,
+    ).catch((error) => {
+      const dlg = openDialog();
+      const text = dlg ? compact(dlg.innerText).slice(0, 150) : "(弹窗已消失)";
+      const btns = dlg
+        ? queryAll("button,[role=button]", dlg)
+            .slice(0, 10)
+            .map(
+              (b) =>
+                norm(b.textContent).slice(0, 12) +
+                "|" +
+                (b.disabled ? "D" : "-") +
+                (b.getAttribute("aria-disabled") === "true" ? "A" : "-") +
+                (visible(b) ? "V" : "h") +
+                "|" +
+                String(b.className).slice(0, 40),
+            )
+            .join(" ;; ")
+        : "";
+      const preview = dlg
+        ? " imgs=" + queryAll("img,canvas", dlg).length
+        : "";
+      error.message =
+        error.message + " | 弹窗=" + text + " 按钮=" + btns + preview;
+      throw error;
+    });
     click(done);
     if (task.platform === "douyin") {
       await sleep(1200);
@@ -1337,7 +1567,7 @@ import {
         compact(document.body.innerText),
       ) &&
       ["不同步，手动编辑", "确认同步"].every(
-        (label) => exactLeaves(document, label).length,
+        (label) => exactLeaves(D(), label).length,
       )
     );
   }
@@ -1526,7 +1756,7 @@ import {
   function douyinCoverOpener(direction) {
     const label = direction === "landscape" ? "横封面4:3" : "竖封面3:4";
     const otherLabel = direction === "landscape" ? "竖封面3:4" : "横封面4:3";
-    for (const marker of exactLeaves(document, label)) {
+    for (const marker of exactLeaves(D(), label)) {
       const card = sectionOf(
         marker.parentElement,
         (element) =>
@@ -1908,6 +2138,516 @@ import {
       ),
     );
   }
+  function tiktokSetting(label, locate) {
+    const leaves = exactLeaves(D(), label);
+    const anchors = [
+      ...leaves,
+      ...[...D().querySelectorAll("label,legend")].filter(
+        (el) =>
+          visible(el) &&
+          norm(el.textContent) === label &&
+          !leaves.some((leaf) => el.contains(leaf)),
+      ),
+    ];
+    const anchor = anchors.length === 1 ? anchors[0] : null;
+    return (
+      anchor &&
+      sectionOf(
+        anchor,
+        (el) => !el.matches('html,body,main,[role="main"]') && locate(el),
+      )
+    );
+  }
+  function tiktokCaption() {
+    const selector = '[contenteditable="true"]';
+    const section = tiktokSetting("說明", (el) => el.querySelector(selector));
+    const editors = [...(section?.querySelectorAll(selector) || [])].filter(
+      visible,
+    );
+    return editors.length === 1 ? editors[0] : null;
+  }
+  function tiktokScheduleRadio(root) {
+    const choices = [
+      ...root.querySelectorAll(
+        'input[type="radio"],div[role="radio"],span[role="radio"],button[type="button"][role="radio"]',
+      ),
+    ].filter((el) => {
+      const doc = el.ownerDocument;
+      const labelled = (el.getAttribute("aria-labelledby") || "")
+        .split(/\s+/)
+        .map((id) => doc.getElementById(id)?.textContent)
+        .join(" ");
+      return [
+        el.getAttribute("aria-label"),
+        labelled,
+        el.textContent,
+        el.closest("label")?.textContent,
+        ...[...(el.labels || [])].map((label) => label.textContent),
+      ].some((text) => norm(text) === "排程");
+    });
+    return choices.length === 1 ? choices[0] : null;
+  }
+  function tiktokScheduleValues(root) {
+    const inputs = (type) =>
+      [...root.querySelectorAll(`input[type="${type}"]`)].filter(visible);
+    const combined = inputs("datetime-local");
+    const readonly = [
+      ...root.querySelectorAll(
+        'input[readonly]:not([type]),input[type="text"][readonly],[role="textbox"][aria-readonly="true"]',
+      ),
+    ].filter(visible);
+    const dates = [
+      ...inputs("date"),
+      ...readonly.filter((el) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(tiktokControlValue(el)),
+      ),
+    ];
+    const times = [
+      ...inputs("time"),
+      ...readonly.filter((el) => /^\d{2}:\d{2}$/.test(tiktokControlValue(el))),
+    ];
+    if (combined.length === 1 && !dates.length && !times.length)
+      return combined;
+    return !combined.length && dates.length === 1 && times.length === 1
+      ? [...dates, ...times]
+      : [];
+  }
+  function tiktokControlValue(el) {
+    return norm(el.value ?? el.textContent);
+  }
+  function tiktokOn(control) {
+    return (
+      control?.checked === true ||
+      control?.getAttribute("aria-checked") === "true"
+    );
+  }
+  function tiktokScheduleSection(withFields = false) {
+    return tiktokSetting(
+      "發佈時間",
+      (el) =>
+        tiktokScheduleRadio(el) &&
+        (!withFields || tiktokScheduleValues(el).length),
+    );
+  }
+  function tiktokTimezone(root) {
+    const offsets = [...root.querySelectorAll("input,span,div,p,output")]
+      .filter((el) => !el.children.length && visible(el))
+      .flatMap((el) => [
+        ...String(el.value ?? el.textContent).matchAll(
+          /\b(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?(?![\d:])/gi,
+        ),
+      ])
+      .map(
+        ([, direction, hours, minutes]) =>
+          `${direction}${hours.padStart(2, "0")}:${minutes || "00"}`,
+      );
+    return offsets.length > 0 && offsets.every((value) => value === "+08:00");
+  }
+  function tiktokScheduleMatches(at) {
+    const section = tiktokScheduleSection(true);
+    if (
+      !section ||
+      !tiktokOn(tiktokScheduleRadio(section)) ||
+      !tiktokTimezone(section)
+    )
+      return false;
+    const controls = tiktokScheduleValues(section);
+    const local = at.slice(0, 16);
+    const values = controls.length === 1 ? [local] : local.split("T");
+    return controls.every(
+      (el, index) =>
+        tiktokControlValue(el) === values[index] &&
+        (!el.checkValidity || el.checkValidity()),
+    );
+  }
+  function tiktokAction(root, label) {
+    const buttons = [...root.querySelectorAll('button,[role="button"]')].filter(
+      (el) =>
+        visible(el) &&
+        norm(el.getAttribute("aria-label") || el.textContent) === label,
+    );
+    return buttons.length === 1 ? buttons[0] : null;
+  }
+  function tiktokDialogs() {
+    return [
+      ...D().querySelectorAll(
+        'dialog[open],[role="dialog"],[aria-modal="true"]',
+      ),
+    ].filter(visible);
+  }
+  function tiktokModal(match) {
+    const matches = tiktokDialogs().filter(match);
+    return matches.length === 1 ? matches[0] : null;
+  }
+  function tiktokPickerDay(root, date) {
+    const days = [
+      ...root.querySelectorAll(
+        '[role="grid"] button[aria-label],[role="grid"] [role="button"][aria-label]',
+      ),
+    ].filter((el) => visible(el) && el.getAttribute("aria-label") === date);
+    return days.length === 1 ? days[0] : null;
+  }
+  function tiktokPickerClock(root, kind, selected) {
+    const expected =
+      kind === "hours"
+        ? Array.from({ length: 24 }, (_, index) =>
+            String(index).padStart(2, "0"),
+          )
+        : Array.from({ length: 12 }, (_, index) =>
+            String(index * 5).padStart(2, "0"),
+          );
+    const choices = [...root.querySelectorAll('[role="listbox"]')]
+      .filter(visible)
+      .map((el) => [...el.querySelectorAll('[role="option"]')].filter(visible))
+      .filter(
+        (items) =>
+          items.length === expected.length &&
+          items.every(
+            (el, index) =>
+              norm(el.getAttribute("aria-label") || el.textContent) ===
+              expected[index],
+          ),
+      );
+    const index = expected.indexOf(selected);
+    return choices.length === 1 && index !== -1 ? choices[0][index] : null;
+  }
+  function tiktokActionAvailable(control) {
+    return (
+      control && !control.disabled && !control.closest('[aria-disabled="true"]')
+    );
+  }
+  async function setTikTokReadonlySchedule(control, value, index) {
+    click(control);
+    await sleep(250);
+    const section = tiktokScheduleSection(true);
+    if (!section) return false;
+    if (index === 0) {
+      const day = tiktokPickerDay(section, value);
+      if (!tiktokActionAvailable(day)) return false;
+      click(day);
+      return true;
+    }
+    const [hours, minutes] = value.split(":");
+    const hour = tiktokPickerClock(section, "hours", hours);
+    const minute = tiktokPickerClock(section, "minutes", minutes);
+    if (!tiktokActionAvailable(hour) || !tiktokActionAvailable(minute))
+      return false;
+    click(hour);
+    await sleep(250);
+    const active = tiktokScheduleSection(true);
+    const refreshed = active && tiktokPickerClock(active, "minutes", minutes);
+    if (!tiktokActionAvailable(refreshed)) return false;
+    click(refreshed);
+    return true;
+  }
+  async function configureTikTokSchedule(task) {
+    const initial = tiktokScheduleSection();
+    const radio = initial && tiktokScheduleRadio(initial);
+    if (!radio) return "未识别「發佈時間」中的排程选项";
+    if (!tiktokOn(radio)) {
+      if (radio.disabled || radio.getAttribute("aria-disabled") === "true")
+        return "「發佈時間」中的排程选项当前不可用";
+      click(radio);
+    }
+    await sleep(350);
+    const section = tiktokScheduleSection();
+    if (!section || !tiktokOn(tiktokScheduleRadio(section)))
+      return "请在「發佈時間」确认排程已启用，必要时处理平台提示";
+    const fields = tiktokScheduleSection(true);
+    if (!fields) return "排程已启用，请在平台日历中选择日期和时间";
+    if (!tiktokTimezone(fields)) return "排程已启用，请核对页面时区和时间";
+    const local = task.schedule.at.slice(0, 16);
+    const values =
+      tiktokScheduleValues(fields).length === 1 ? [local] : local.split("T");
+    for (const [index, value] of values.entries()) {
+      const current = tiktokScheduleSection(true);
+      const control = current && tiktokScheduleValues(current)[index];
+      if (!control || !tiktokTimezone(current)) break;
+      if (tiktokControlValue(control) === value) continue;
+      if (control.disabled || control.getAttribute("aria-disabled") === "true")
+        break;
+      if (
+        control.readOnly ||
+        control.hasAttribute("readonly") ||
+        control.getAttribute("aria-readonly") === "true"
+      ) {
+        if (
+          values.length !== 2 ||
+          !(await setTikTokReadonlySchedule(control, value, index))
+        )
+          break;
+      } else {
+        textField(control, value);
+      }
+      await sleep(350);
+      const updated = tiktokScheduleSection(true);
+      const readback = updated && tiktokScheduleValues(updated)[index];
+      if (!readback || tiktokControlValue(readback) !== value) break;
+    }
+    return tiktokScheduleMatches(task.schedule.at)
+      ? ""
+      : "未核实排程的日期和时间，请在平台日历复核";
+  }
+  function tiktokAICheckbox(root) {
+    const switches = [
+      ...root.querySelectorAll('input[type="checkbox"],[role="switch"]'),
+    ];
+    return switches.length === 1 ? switches[0] : null;
+  }
+  function tiktokAIControl() {
+    const section = tiktokSetting("AI 產生的內容", tiktokAICheckbox);
+    return section && tiktokAICheckbox(section);
+  }
+  function tiktokAIVerified() {
+    return (
+      tiktokOn(tiktokAIControl()) &&
+      exactLeaves(D(), "創作者已標記為由 AI 產生").length === 1
+    );
+  }
+  async function configureTikTokAI() {
+    if (tiktokAIVerified()) return;
+    if (!tiktokAIControl()) {
+      const more = tiktokAction(D(), "顯示更多");
+      if (!tiktokActionAvailable(more)) attention("请在平台核对 AI 声明");
+      click(more);
+    }
+    const control = await wait(
+      tiktokAIControl,
+      "未找到独立的 AI 内容开关",
+      4000,
+    );
+    if (!tiktokOn(control)) {
+      if (!tiktokActionAvailable(control)) attention("AI 内容开关当前不可用");
+      click(control);
+      const confirmation = await wait(
+        () =>
+          tiktokAIVerified() ||
+          tiktokModal(
+            (modal) =>
+              exactLeaves(modal, "標記由 AI 產生的內容").length === 1 &&
+              tiktokAction(modal, "開啟"),
+          ),
+        "AI 声明等待平台确认",
+        4000,
+      );
+      if (confirmation !== true) {
+        const confirm = tiktokAction(confirmation, "開啟");
+        if (!tiktokActionAvailable(confirm)) attention("AI 声明确认当前不可用");
+        click(confirm);
+      }
+    }
+    await wait(tiktokAIVerified, "未在预览读到 AI 声明，请在平台核对", 4000);
+  }
+  function tiktokCoverSource(img) {
+    const source = img.currentSrc || img.getAttribute("src");
+    if (!source || !img.complete || img.naturalWidth <= 0) return "";
+    try {
+      const url = new URL(source, location.href);
+      return url.protocol === "https:" ? url.origin + url.pathname : url.href;
+    } catch {
+      return "";
+    }
+  }
+  function tiktokCoverPreview() {
+    const images = (el) => [...el.querySelectorAll("img")].filter(visible);
+    const section = tiktokSetting("編輯封面", (el) => images(el).length === 1);
+    return section ? tiktokCoverSource(images(section)[0]) : "";
+  }
+  function tiktokCoverDialog() {
+    return tiktokModal(
+      (modal) =>
+        tiktokAction(modal, "Upload cover image") &&
+        tiktokAction(modal, "儲存"),
+    );
+  }
+  const tiktokGeneratedCover =
+    /(?:^|[^0-9a-f])(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{32})(?:$|[^0-9a-f])/i;
+  async function configureTikTokCover(task, asset) {
+    const target = location.href;
+    const previous = await wait(
+      tiktokCoverPreview,
+      "未找到可核对的原封面预览",
+      6000,
+    );
+    const opener = tiktokAction(D(), "編輯封面");
+    if (!tiktokActionAvailable(opener)) attention("封面编辑入口当前不可用");
+    const local = await file(task, asset);
+    if (
+      location.href !== target ||
+      !opener.isConnected ||
+      tiktokDialogs().length ||
+      tiktokCoverPreview() !== previous
+    )
+      attention("封面编辑状态已变化，请在原页面核对");
+    click(opener);
+    const modal = await wait(tiktokCoverDialog, "未核实封面编辑窗口", 5000);
+    const inputs = [
+      ...modal.querySelectorAll('input[type="file"][accept]'),
+    ].filter(
+      (el) =>
+        tiktokActionAvailable(el) &&
+        acceptsImage(el) &&
+        !/video|\.mp4|\.mov/i.test(el.getAttribute("accept")),
+    );
+    if (inputs.length !== 1) attention("未找到封面窗口内独立的图片输入");
+    const previews = () =>
+      [...modal.querySelectorAll("img")]
+        .filter(visible)
+        .map(tiktokCoverSource)
+        .filter(
+          (src) =>
+            /^(blob:|data:image\/)/i.test(src) ||
+            tiktokGeneratedCover.test(src),
+        );
+    const originals = new Set(previews());
+    await upload(inputs[0], local);
+    await wait(
+      () =>
+        tiktokCoverDialog() === modal &&
+        new Set(previews().filter((src) => !originals.has(src))).size === 1,
+      "封面窗口未显示所选图片的独立预览，请在平台核对",
+      7000,
+    );
+    const save = tiktokAction(modal, "儲存");
+    if (location.href !== target || !tiktokActionAvailable(save))
+      attention("封面保存状态已变化，请在原页面核对");
+    click(save);
+    return wait(
+      () => {
+        if (tiktokDialogs().length) return false;
+        const updated = tiktokCoverPreview();
+        return (
+          updated !== previous &&
+          /^https:\/\//.test(updated) &&
+          tiktokGeneratedCover.test(updated) &&
+          updated
+        );
+      },
+      "未能回读保存后的新封面，请在平台核对",
+      8000,
+    );
+  }
+  async function tiktokAttempt(issues, operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!error.needsAttention) throw error;
+      issues.push(error.message);
+    }
+  }
+  async function tiktokVideo(task) {
+    auth();
+    const config = PLATFORMS.tiktok;
+    const isUploadPage = () => {
+      const url = new URL(location.href);
+      return (
+        config.editorPaths.some((re) => re.test(url.pathname)) &&
+        !config.isExistingWork(url)
+      );
+    };
+    if (!isUploadPage()) attention("请打开 TikTok Studio 的新视频上传页");
+    if (task.schedule?.submit) attention("TikTok 排程需在原页面确认提交");
+    const asset = task.assets.find((item) => item.role === "video");
+    const composer = () =>
+      field('[contenteditable="true"]') || exact("編輯封面");
+    if (composer()) attention("当前上传页已有视频编辑内容，请在原页面继续核对");
+    const videoInput = () => {
+      const controls = [
+        ...D().querySelectorAll('input[type="file"][accept]'),
+      ].filter(
+        (el) =>
+          !el.disabled &&
+          /video\/|\.mp4|\.mov/i.test(el.getAttribute("accept")),
+      );
+      if (controls.length !== 1 || controls[0].files?.length) return null;
+      return composer() ? null : controls[0];
+    };
+    await wait(
+      videoInput,
+      "未找到空白上传页的视频入口，请保留现有编辑内容",
+      6000,
+    );
+    await status(task, "uploading", "上传 TikTok 视频素材");
+    const selected = await file(task, asset);
+    const input = videoInput();
+    if (!isUploadPage() || !input?.isConnected)
+      attention("上传入口已改变，请在原页面核对视频");
+    await upload(input, selected);
+    const caption = await wait(
+      tiktokCaption,
+      "未找到「說明」编辑框，请在原页面核对已选视频",
+      300000,
+    );
+    if (!isUploadPage()) attention("上传页地址已改变，请在原页面核对视频");
+    if (editorText(caption))
+      attention("说明框已有内容，请在原页面核对并保留现有编辑");
+    const description = (task.description || "").replace(/\r\n/g, "\n");
+    const copy =
+      description.split("\n", 1)[0] === task.title
+        ? description
+        : [task.title, description].filter(Boolean).join("\n\n");
+    const content = () =>
+      (tiktokCaption()?.innerText ?? "").replace(/\r\n/g, "\n").trimEnd();
+    await fillEditable(caption, copy, { pasteFirst: copy.includes("\n") });
+    await sleep(350);
+    if (content() !== copy.trimEnd())
+      attention("说明未通过完整性核验，请在原页面检查标题、换行和描述");
+    const issues = [];
+    if (task.aiGenerated && !tiktokDialogs().length)
+      await tiktokAttempt(issues, configureTikTokAI);
+    const cover = coverFile(task, [
+      "cover-portrait",
+      "cover",
+      "cover-landscape",
+    ]);
+    const savedCover =
+      cover && !tiktokDialogs().length
+        ? await tiktokAttempt(issues, () => configureTikTokCover(task, cover))
+        : "";
+    const at = task.schedule?.at;
+    const requested = at && at.slice(0, 16).replace("T", " ") + " UTC+08:00";
+    if (at) {
+      const issue = tiktokDialogs().length
+        ? "请处理当前窗口后在平台设置排程"
+        : await tiktokAttempt(issues, () => configureTikTokSchedule(task));
+      if (issue) issues.push(`${issue}（目标 ${requested}）`);
+    }
+    if (!isUploadPage() || content() !== copy.trimEnd())
+      attention("编辑页面或说明发生变化，请在原页面复核");
+    const calendarVerified = Boolean(at && tiktokScheduleMatches(at));
+    const aiVerified = task.aiGenerated && tiktokAIVerified();
+    const coverVerified = savedCover && tiktokCoverPreview() === savedCover;
+    const evidence = [
+      ...(calendarVerified
+        ? [`排程已启用，平台时间字段回读 ${requested}`]
+        : []),
+      ...(aiVerified ? ["预览已回读 AI 声明"] : []),
+      ...(coverVerified ? ["已回读保存后的新封面预览"] : []),
+    ];
+    const review = [
+      "视频、封面裁切和可见性",
+      ...(task.aiGenerated && !aiVerified ? ["AI 声明"] : []),
+      ...(at && !calendarVerified ? [`排程时间 ${requested}`] : []),
+      ...(task.collection || task.schedule?.collection ? ["合集"] : []),
+      ...(task.tags ? ["独立标签"] : []),
+    ].join("、");
+    return {
+      state: "needs_attention",
+      persisted: false,
+      ...(calendarVerified ? { scheduledAt: at } : {}),
+      ...(evidence.length
+        ? { evidence: [...evidence, "说明与素材文案一致"].join("，") }
+        : {}),
+      message: [
+        "说明已核验",
+        ...evidence,
+        ...issues,
+        `请核对${review}后在 TikTok Studio 提交`,
+      ].join("；"),
+      editorUrl: location.href,
+      resume: { title: task.title, kind: task.kind },
+    };
+  }
   function exactLeaves(root, label) {
     return queryAll(
       'button,[role="button"],[role="option"],[role="heading"],h1,h2,h3,h4,h5,h6,p,span,li,td,div',
@@ -1922,19 +2662,38 @@ import {
     );
   }
   function calendarCell(year, month, day) {
+    // 视频号的日期格是 <a>，通用 exactLeaves 不含 a，这里单独支持。
+    // 从主文档出发搜索（queryAll 会穿透 iframe 与 shadow DOM），
+    // 避免日历面板渲染在别的文档里时找不到。
+    let root = document;
+    try {
+      if (window.top?.document?.body) root = window.top.document;
+    } catch {}
+    const leaves = (top, label) =>
+      queryAll(
+        'button,[role="button"],[role="option"],h1,h2,h3,h4,h5,h6,p,span,li,td,div,a',
+        top,
+      ).filter(
+        (el) =>
+          visible(el) &&
+          norm(el.textContent) === label &&
+          !Array.from(el.children).some(
+            (child) => norm(child.textContent) === label,
+          ),
+      );
     const combined = [`${year}年 ${month}月`, `${year}年${month}月`];
     const visibleMonth =
-      combined.some((label) => exactLeaves(document, label).length) ||
-      (exactLeaves(document, `${year}年`).length &&
-        exactLeaves(document, `${month}月`).length);
+      combined.some((label) => leaves(root, label).length) ||
+      (leaves(root, `${year}年`).length &&
+        leaves(root, `${month}月`).length);
     if (!visibleMonth) return null;
     // The date grid and the clocks can share one popover. Unpadded days
     // distinguish the calendar rows from the hours/minutes columns.
-    const roots = exactLeaves(document, "1")
+    const roots = leaves(root, "1")
       .map((dayOne) =>
         sectionOf(dayOne, (node) =>
           ["5", "8", "15", "22", String(day)].every(
-            (label) => exactLeaves(node, label).length,
+            (label) => leaves(node, label).length,
           ),
         ),
       )
@@ -1943,8 +2702,39 @@ import {
         (a, b) =>
           a.querySelectorAll("*").length - b.querySelectorAll("*").length,
       );
-    const days = roots[0] ? exactLeaves(roots[0], String(day)) : [];
-    return days.length === 1 ? days[0] : null;
+    const days = roots[0] ? leaves(roots[0], String(day)) : [];
+    if (days.length <= 1) return days[0] || null;
+    // 视频号日历会把相邻月份的同号日期渲染成禁用格，排除后再要求唯一。
+    const enabled = days.filter(
+      (el) =>
+        !/disabled/.test(String(el.className)) &&
+        !(el.closest?.('[class*="disabled"]') || null),
+    );
+    if (enabled.length === 1) return enabled[0];
+    // 双月视图：同号日期会出现在两个月面板里，按所属月份面板过滤
+    const monthLabels = [
+      `${year}年 ${month}月`,
+      `${year}年${month}月`,
+      `${year} 年 ${month} 月`,
+    ];
+    const yearLabels = [`${year}年`, `${year} 年`];
+    const monthOnly = [`${month}月`, `${month} 月`];
+    const inMonth = enabled.filter((el) => {
+      let node = el.parentElement;
+      for (let i = 0; node && node !== roots[0] && i < 8; i++, node = node.parentElement) {
+        if (
+          monthLabels.some((label) => leaves(node, label).length) ||
+          (yearLabels.some((label) => leaves(node, label).length) &&
+            monthOnly.some((label) => leaves(node, label).length))
+        )
+          return true;
+      }
+      return false;
+    });
+    if (inMonth.length) return inMonth[0];
+    // 兜底：面板为「当前月 + 次月」布局时，过去日期格均为禁用，
+    // 第一个可用格即目标日期（submit.mjs 用 cells[0] 验证有效）
+    return enabled[0] || null;
   }
   function sectionOf(label, predicate) {
     let node = label;
@@ -1972,8 +2762,8 @@ import {
   function schedulingControl() {
     const selector =
       'input[type="radio"],input[type="checkbox"],[role="switch"],[role="radio"],[role="checkbox"]';
-    const toggle = ["定时发布", "定时发表"]
-      .flatMap((text) => exactLeaves(document, text))
+    const toggle = ["定时发布", "定时发表", "定时"]
+      .flatMap((text) => exactLeaves(D(), text))
       .map((label) =>
         sectionOf(
           label,
@@ -1999,26 +2789,38 @@ import {
   }
   async function enableScheduling() {
     if (scheduleInput() && schedulingEnabled()) return;
+    const attempts = [];
     const control = schedulingControl();
     if (
-      !control ||
-      control.disabled ||
-      control.getAttribute("aria-disabled") === "true"
+      control &&
+      !control.disabled &&
+      control.getAttribute("aria-disabled") !== "true"
     )
-      attention("平台定时开关不可用");
-    if (!schedulingEnabled()) control.click();
-    await wait(
-      () => schedulingEnabled() && scheduleInput(),
-      "平台未打开日期时间控件",
-      5000,
-    );
+      attempts.push(() => control.click());
+    // 视频号的开关是纯文字单选（不定时/定时），控件本体可能无法被
+    // sectionOf 归位；退而求其次直接点文字。
+    const leaf = ["定时", "定时发布", "定时发表"]
+      .flatMap((text) => exactLeaves(D(), text))
+      .find(visible);
+    if (leaf) attempts.push(() => leaf.click());
+    if (!attempts.length) attention("平台定时开关不可用");
+    for (const attempt of attempts) {
+      attempt();
+      const ok = await wait(
+        () => scheduleInput() && (schedulingEnabled() || !schedulingControl()),
+        "平台未打开日期时间控件",
+        4000,
+      ).catch(() => false);
+      if (ok) return;
+    }
+    attention("平台未打开日期时间控件");
   }
   function pickerColumn(last) {
     const labels = (el) =>
       norm(el.textContent).match(/^(\d{2})(?:时|分)?$/)?.[1];
     const zeros = [
-      ...exactLeaves(document, "00"),
-      ...exactLeaves(document, last === 23 ? "00时" : "00分"),
+      ...exactLeaves(D(), "00"),
+      ...exactLeaves(D(), last === 23 ? "00时" : "00分"),
     ];
     return zeros
       .map((zero) =>
@@ -2102,13 +2904,49 @@ import {
     const input = scheduleInput();
     input.focus?.();
     await sleep(150);
-    if (!calendarCell(year, month, day) && !pickerColumn(23)) click(input);
+    if (!calendarCell(year, month, day) && !pickerColumn(23))
+      pointerClick(input);
     if (scheduleValue()?.split(" ")[0] !== date) {
       const dayButton = await wait(
         () => calendarCell(year, month, day),
         "当前日历无法唯一确认预约日期 " + date,
         5000,
-      );
+      ).catch((error) => {
+        let root = document;
+        try {
+          if (window.top?.document?.body) root = window.top.document;
+        } catch {}
+        const labels = [
+          ...new Set(
+            queryAll("th,span,div,p,td,a", root)
+              .filter(
+                (el) =>
+                  visible(el) &&
+                  /\d{4}\s*年/.test(norm(el.textContent)) &&
+                  norm(el.textContent).length < 20,
+              )
+              .map((el) => norm(el.textContent)),
+          ),
+        ].slice(0, 6);
+        const dayCells = queryAll("a,td,span,div", root)
+          .filter((el) => norm(el.textContent) === String(day))
+          .slice(0, 6)
+          .map(
+            (el) =>
+              String(el.tagName) +
+              ":" +
+              String(el.className).slice(0, 45) +
+              (el.closest?.('[class*="disabled"]') ? " DIS" : ""),
+          );
+        error.message +=
+          " | 月标签=[" +
+          labels.join(";") +
+          "] " +
+          day +
+          "日格=" +
+          JSON.stringify(dayCells);
+        throw error;
+      });
       click(dayButton);
       await wait(
         () => scheduleValue()?.startsWith(date),
@@ -2117,9 +2955,73 @@ import {
       );
     }
     if (scheduleValue() === expected) return;
+    if (task.platform === "channels") {
+      // 视频号面板分两段：日期格面板（.weui-desktop-picker__panel）提交日期，
+      // 「请选择时间」输入框再展开独立的时/分滚轮面板（"00 01 02 ..."）。
+      // 滚轮选中项决定主输入的时间值，直接走滚轮选择（与抖音同款机制）。
+      const timeBox = () =>
+        queryAll("input").find(
+          (el) =>
+            visible(el) && (el.placeholder || "").includes("请选择时间"),
+        );
+      if (!pickerColumn(23)) {
+        const box = timeBox();
+        if (!box) attention("视频号定时面板里没有时间输入框");
+        box.focus?.();
+        await sleep(150);
+        pointerClick(box);
+        await sleep(1000);
+      }
+      const hours = await wait(
+        () => pickerColumn(23),
+        "",
+        8000,
+      ).catch(async (error) => {
+        const p = queryAll(".weui-desktop-picker__panel").find((el) =>
+          visible(el),
+        );
+        const leaves = queryAll("div,span,li,button,a,td,p", p || D())
+          .filter((el) => el.children.length === 0 && norm(el.textContent))
+          .map((el) => norm(el.textContent).slice(0, 14));
+        const uniq = [...new Set(leaves)].slice(0, 40);
+        const boxes = queryAll("input")
+          .filter((el) => visible(el))
+          .slice(0, 6)
+          .map((el) => (el.placeholder || "").slice(0, 12) + "/" + norm(el.value).slice(0, 16))
+          .join(",");
+        attention(
+          "未找到视频号小时滚轮列 | 面板叶子=" +
+            uniq.join(",") +
+            " inputs=[" +
+            boxes +
+            "]",
+        );
+      });
+      if (scheduleValue()?.slice(11, 13) !== hour)
+        await setDouyinTimePart(hour, "时", 11, 23);
+      if (scheduleValue() === expected) return;
+      if (scheduleValue()?.slice(14, 16) !== minute) {
+        const minutes = await wait(
+          () => pickerColumn(59),
+          "未找到视频号分钟滚轮列",
+          8000,
+        ).catch(() => null);
+        if (minutes) await setDouyinTimePart(minute, "分", 14, 59);
+      }
+      scheduleInput()?.blur?.();
+      await sleep(350);
+      if (scheduleValue() !== expected)
+        attention(
+          "视频号未接受发表时间 " +
+            expected +
+            " | 主输入=" +
+            (scheduleInput()?.value || "(无)"),
+        );
+      return;
+    }
     if (task.platform === "douyin" && !pickerColumn(23)) {
       const currentClock = scheduleValue()?.split(" ")[1];
-      const opener = currentClock && exactLeaves(document, currentClock)[0];
+      const opener = currentClock && exactLeaves(D(), currentClock)[0];
       if (!opener) attention("未找到抖音时间列表");
       click(opener);
     }
@@ -2208,7 +3110,7 @@ import {
         ".selector-container .select-controller",
       ).filter(visible);
       if (controls.length === 1) return controls[0];
-      const heading = exactLeaves(document, "分区");
+      const heading = exactLeaves(D(), "分区");
       if (heading.length !== 1) return null;
       const section = sectionOf(
         heading[0],
@@ -2313,18 +3215,17 @@ import {
       );
     }
     const collection = task.collection ?? task.schedule.collection;
-    if (collection) await selectVideoCollection(collection, task.platform);
+    if (collection) await selectVideoCollection(collection, task.platform, task);
     if (!matches()) attention("B 站定时或文案发生变化，请核对原页面");
     return {
       scheduledAt: task.schedule.at,
       evidence: "B 站编辑器显示定时 " + expected + " (UTC+08:00)",
     };
   }
-  async function selectVideoCollection(collection, platform) {
-    if (!collection) return;
-    const selected = () =>
+  function videoCollectionSelected(collection) {
+    return !collection ||
       ["加入合集", "添加合集", "合集"].some((label) =>
-        exactLeaves(document, label).some((el) =>
+        exactLeaves(D(), label).some((el) =>
           sectionOf(
             el,
             (node) =>
@@ -2336,19 +3237,24 @@ import {
           ),
         ),
       );
+  }
+  async function selectVideoCollection(collection, platform, task) {
+    const selected = () => videoCollectionSelected(collection);
     if (selected()) return;
     const opener = controlByText(["选择合集", "请选择合集"]);
     if (!opener) attention("未找到平台合集入口");
     click(opener);
     const item = await wait(
       () => {
-        const options = exactLeaves(document, collection);
+        const options = exactLeaves(D(), collection);
         return options.length === 1 ? options[0] : null;
       },
       "未找到唯一的合集「" + collection + "」",
       6000,
     );
-    if (platform === "douyin") {
+    if (platform === "xiaohongshu") {
+      click(item);
+    } else if (platform === "douyin") {
       const row =
         item.closest('[role="option"]') ||
         sectionOf(
@@ -2388,8 +3294,59 @@ import {
         for (const type of ["mousedown", "mouseup", "click"])
           target.dispatchEvent(new MouseEvent(type, options));
       } else target.click();
-    } else click(item);
-    await wait(selected, "平台未确认选中合集「" + collection + "」", 5000);
+    } else {
+      // 视频号弹层对单点 click 不响应：沿祖先链逐层触发完整指针事件
+      // （与「首页」导航同款策略，已验证有效）
+      const fire = (el) => {
+        for (const type of [
+          "pointerdown",
+          "mousedown",
+          "pointerup",
+          "mouseup",
+          "click",
+        ])
+          try {
+            el.dispatchEvent(
+              new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                view: el.ownerDocument?.defaultView || window,
+                button: 0,
+              }),
+            );
+          } catch {}
+      };
+      let node = item;
+      for (let i = 0; i < 5 && node; i++) {
+        fire(node);
+        await sleep(700);
+        if (selected()) break;
+        node = node.parentElement;
+      }
+    }
+    await sleep(500);
+    // 关闭合集选择弹层（submit.mjs 验证过的做法），否则弹层里的同名
+    // 选项会干扰选中态判断
+    try {
+      (D().activeElement || D().body || D().documentElement)?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          keyCode: 27,
+          bubbles: true,
+        }),
+      );
+    } catch {}
+    await sleep(600);
+    try {
+      await wait(selected, "", 6000);
+    } catch {
+      if (platform === "xiaohongshu")
+        attention("未核对到已选合集「" + collection + "」");
+      note(
+        task,
+        "合集「" + collection + "」可能未成功选中，请发表后手动核对",
+      );
+    }
   }
   async function selectVideoDisclosure(task) {
     if (!task.aiGenerated) return;
@@ -2402,7 +3359,7 @@ import {
     const control = controlByText(opener);
     const disclosureOption = () =>
       controlByText(statement) ||
-      exactLeaves(document, statement)[0] ||
+      exactLeaves(D(), statement)[0] ||
       queryAll('button,[role="option"],[role="menuitem"],label,li,span,div')
         .filter(
           (element) =>
@@ -2475,7 +3432,7 @@ import {
       attention("请先核对文案和要求的封面，再继续设置定时");
     if (!collectionAfterTime) {
       await status(task, "filling", "选择合集");
-      await selectVideoCollection(collection, task.platform);
+      await selectVideoCollection(collection, task.platform, task);
     }
     await status(task, "filling", "写入平台原生定时");
     await setNativeTime(task, expected);
@@ -2502,7 +3459,7 @@ import {
       )
         throw error;
       if (collectionAfterTime)
-        await selectVideoCollection(collection, task.platform);
+        await selectVideoCollection(collection, task.platform, task);
       return {
         ...ready,
         message: "定时和合集已写入，AI 声明待确认，尚未提交",
@@ -2511,7 +3468,7 @@ import {
     }
     if (collectionAfterTime) {
       await status(task, "filling", "选择合集");
-      await selectVideoCollection(collection, task.platform);
+      await selectVideoCollection(collection, task.platform, task);
     }
     if (!schedule.submit || task.fillOnly || !submitLabel)
       return {
@@ -2536,7 +3493,7 @@ import {
     // General editing helpers still reject Publish. Only the verified
     // scheduled action above may be submitted with the explicit CLI flag.
     const beforeUrl = location.href;
-    if (/发布成功|预约成功/.test(document.body.innerText))
+    if (/发布成功|预约成功/.test(D().body.innerText))
       attention("页面已有成功提示，请核对对应作品，避免重发");
     let accepted;
     try {
@@ -2563,7 +3520,8 @@ import {
       button.getAttribute("aria-disabled") === "true" ||
       norm(button.textContent) !== submitLabel ||
       scheduleWindowIssue(task.platform, schedule.at) ||
-      !copyMatches()
+      !copyMatches() ||
+      (task.platform === "xiaohongshu" && !videoCollectionSelected(collection))
     )
       return {
         ...ready,
@@ -2571,11 +3529,14 @@ import {
         message: "点击提交前的平台状态发生变化，请核对原页面",
       };
     button.click();
+    const receiptRe = new RegExp(
+      PLATFORMS[task.platform].schedule.receiptPattern ||
+        "定时发布成功|预约成功|发布成功",
+    );
     try {
       const receipt = await wait(
         () => {
-          const result =
-            document.body.innerText.match(/定时发布成功|预约成功|发布成功/);
+          const result = D().body.innerText.match(receiptRe);
           if (result && !scheduleInput()) return result[0];
           if (
             receiptPath?.test(location.pathname) &&
@@ -2602,7 +3563,15 @@ import {
       };
     }
   }
+  function assertVideoUploadPage(platform) {
+    const existingWork = PLATFORMS[platform].isExistingWork;
+    if (existingWork?.(new URL(location.href)))
+      attention("已打开现有作品，请从空白发布页新建修正版");
+    if (platform === "douyin" && pageRole(location.href).role !== "editor")
+      attention("当前页面不是抖音的新建投稿页");
+  }
   async function video(task) {
+    assertVideoUploadPage(task.platform);
     auth();
     if (
       task.platform === "channels" &&
@@ -2652,10 +3621,10 @@ import {
         ),
       );
     }
-    task._draftCount = /草稿箱[（(](\d+)/.exec(document.body.innerText)?.[1];
+    task._draftCount = /草稿箱[（(](\d+)/.exec(D().body.innerText)?.[1];
     await status(task, "uploading", "上传视频素材");
     const asset = task.assets.find((a) => a.role === "video");
-    let input = inputFor("video");
+    let input = task.platform === "channels" ? null : inputFor("video");
     if (!input && task.platform === "xiaohongshu") {
       const uploadTab = exact("上传视频");
       if (uploadTab) click(uploadTab);
@@ -2668,12 +3637,78 @@ import {
       );
     if (!input && task.platform === "douyin")
       input = await wait(
-        () => inputFor("video") || document.querySelector("input[type=file]"),
+        () => inputFor("video"),
         "抖音上传页未出现视频选择框，请检查账号和页面",
         20000,
       );
+    if (!input && task.platform === "channels") {
+      // 引导挂载真实表单（必要时回首页点「发表视频」），再定位上传控件
+      const formDoc = await bootstrapChannelsEditor(task).catch(() => null);
+      docOverride = formDoc || document;
+      try {
+        const top = window.top?.document;
+        const frames = top
+          ? queryAll("iframe", top)
+              .slice(0, 8)
+              .map((f) => {
+                let ok = "?";
+                try {
+                  ok = f.contentDocument?.body ? "ok" : "no";
+                } catch {
+                  ok = "x";
+                }
+                return (f.src || "").replace(/^https?:\/\/[^/]+/, "").slice(0, 60) + ":" + ok;
+              })
+              .join(",")
+          : "no-top";
+        await status(
+          task,
+          "filling",
+          "表单定位 run@" +
+            location.pathname.slice(-24) +
+            " top@" +
+            (top ? top.location.pathname.slice(-24) : "?") +
+            " doc=" +
+            (docOverride === document ? "self" : "form") +
+            " iframes=" +
+            frames,
+        );
+      } catch {}
+      input = await wait(
+        () => {
+          // queryAll 已穿透 shadow DOM 与嵌套 iframe：直接从主文档全局搜，
+          // 排除诱饵控件；找到后把 docOverride 指到真实表单文档。
+          for (const d of [document, window.top?.document]) {
+            if (!d?.body) continue;
+            const inputs = queryAll(
+              'input[type=file][accept*="video"], input[type=file][accept*="mp4"], input[type=file]',
+              d,
+            ).filter((el) => !isDecoy(el) && !el.disabled);
+            if (inputs.length) return inputs[0];
+          }
+          return null;
+        },
+        "视频号表单未出现视频选择框（上传组件挂载超时）",
+        60000,
+      );
+      docOverride = input.ownerDocument || docOverride;
+    }
     if (!input) attention("未找到视频上传控件，请先进入平台的视频上传页");
-    await upload(input, await file(task, asset));
+    const videoFile = await file(task, asset);
+    assertVideoUploadPage(task.platform);
+    if (task.platform === "douyin" && (input.disabled || !input.isConnected))
+      attention("抖音的视频选择框不可用，请核对原页面");
+    await upload(input, videoFile);
+    if (task.platform === "channels") {
+      // 上传后 5 秒回报表单文本，确认平台是否真的开始接收视频
+      await sleep(5000);
+      try {
+        const snippet = (D().body?.innerText || "")
+          .replace(/\s+/g, " ")
+          .slice(0, 220);
+        await status(task, "filling", "上传响应 " + snippet);
+      } catch {}
+    }
     if (task.platform === "xiaohongshu") {
       const title = await wait(
         () =>
@@ -2763,7 +3798,7 @@ import {
         );
       click(save);
       const proof = await wait(
-        () => /草稿保存成功|已保存草稿|暂存成功/.test(document.body.innerText),
+        () => /草稿保存成功|已保存草稿|暂存成功/.test(D().body.innerText),
         "未确认视频号草稿保存，请打开原页面检查",
       );
       return result(task, "视频号显示保存草稿成功");
@@ -3002,6 +4037,7 @@ import {
       if (task.platform === "bilibili") return bilibiliVideo(task);
       if (task.platform === "youtube") return youtubeVideo(task);
       if (task.platform === "instagram") return instagramVideo(task);
+      if (task.platform === "tiktok") return tiktokVideo(task);
       return video(task);
     })()
       .then((result) => reply({ ok: true, result }))

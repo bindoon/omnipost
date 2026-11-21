@@ -53,8 +53,9 @@ await build({
 await build({
   entryPoints: [
     new URL("./extension/content/runner.js", import.meta.url).pathname,
+    new URL("./extension/content/replacement.js", import.meta.url).pathname,
   ],
-  outfile: new URL("content/runner.js", dist).pathname,
+  outdir: new URL("content", dist).pathname,
   bundle: true,
   format: "iife",
   platform: "browser",

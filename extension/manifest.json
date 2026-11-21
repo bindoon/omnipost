@@ -11,7 +11,8 @@
     "alarms",
     "unlimitedStorage",
     "sidePanel",
-    "notifications"
+    "notifications",
+    "webNavigation"
   ],
   "host_permissions": [
     "https://mp.weixin.qq.com/*",
@@ -22,6 +23,7 @@
     "https://member.bilibili.com/*",
     "https://studio.youtube.com/*",
     "https://www.instagram.com/*",
+    "https://www.tiktok.com/*",
     "http://127.0.0.1/*"
   ],
   "content_security_policy": {

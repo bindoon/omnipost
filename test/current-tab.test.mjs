@@ -4,6 +4,13 @@ import fs from "node:fs/promises";
 import vm from "node:vm";
 import * as model from "../extension/shared/model.js";
 import * as target from "../extension/shared/target.js";
+import * as replacement from "../extension/shared/video-replacement.js";
+const backgroundSource = (
+  await fs.readFile(
+    new URL("../extension/background.js", import.meta.url),
+    "utf8",
+  )
+).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
 const task = () =>
   model.validateTask({
     id: "staged-video",
@@ -140,15 +147,10 @@ test("素材交接不建平台页；点击插件保留标签；填充用原页�
     },
     alarms: { onAlarm: { addListener() {} }, create() {} },
   };
-  const source = (
-    await fs.readFile(
-      new URL("../extension/background.js", import.meta.url),
-      "utf8",
-    )
-  ).replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, "");
-  vm.runInNewContext(source, {
+  vm.runInNewContext(backgroundSource, {
     ...model,
     ...target,
+    ...replacement,
     chrome,
     console,
     URL,
@@ -469,4 +471,87 @@ test("公众号入口使用当前会话的新文章地址，旧图文与已有�
   );
   assert.equal(noSession.searchParams.get("token"), null);
   assert.equal(noSession.searchParams.get("action"), "list_card");
+});
+
+test("抖音慢导航只向已提交的主文档派发一次，丢失响应时保留提交待核对", async () => {
+  const url = model.PLATFORMS.douyin.url;
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const job = {
+    ...task(),
+    platforms: ["douyin"],
+    schedule: { at: tomorrow + "T17:00:00+08:00", submit: true },
+    results: { douyin: {} },
+  };
+  let tabReads = 0,
+    frameReads = 0,
+    sent = 0;
+  const injected = [];
+  const listen = { addListener() {} };
+  const chrome = {
+    runtime: { onMessage: listen },
+    action: { onClicked: listen },
+    alarms: { onAlarm: listen, create() {} },
+    storage: { local: { get: async () => ({}), set: async () => {} } },
+    tabs: {
+      onUpdated: listen,
+      onActivated: listen,
+      query: async () => [],
+      create: async () => ({ id: 81, url: "" }),
+      get: async () => ({
+        id: 81,
+        status: "complete",
+        url: ++tabReads === 1 ? "about:blank" : url,
+      }),
+      async sendMessage(id, message, destination) {
+        sent++;
+        assert.equal(id, 81);
+        assert.equal(message.type, "RUN_DRAFT");
+        assert.deepEqual({ ...destination }, { documentId: "editor-document" });
+        job.results.douyin.state = "submitting";
+        throw new Error("The message port closed");
+      },
+    },
+    webNavigation: {
+      async getFrame(query) {
+        assert.deepEqual({ ...query }, { tabId: 81, frameId: 0 });
+        if (++frameReads === 1)
+          return { url: "about:blank", documentId: "old" };
+        return { url, documentId: "editor-document" };
+      },
+    },
+    scripting: {
+      executeScript: async ({ target }) =>
+        injected.push(structuredClone(target)),
+    },
+  };
+  const context = vm.createContext({
+    ...model,
+    ...target,
+    chrome,
+    URL,
+    console,
+    get: async () => job,
+    put: async () => {},
+    all: async () => [],
+    setTimeout: (fn, ms) =>
+      ms === 300 ? setImmediate(fn) : setTimeout(fn, ms).unref(),
+  });
+  vm.runInContext(backgroundSource, context);
+  await context.runPlatform(job, "douyin");
+  assert.equal(tabReads, 3);
+  assert.equal(frameReads, 2);
+  assert.deepEqual(injected, [{ tabId: 81, documentIds: ["editor-document"] }]);
+  assert.equal(sent, 1);
+  assert.equal(job.results.douyin.state, "schedule_unconfirmed");
+  assert.equal(job.results.douyin.editorUrl, url);
+
+  chrome.tabs.get = async () => ({
+    id: 81,
+    status: "complete",
+    url: "https://creator.douyin.com/creator-micro/content/post/video?iid=123",
+  });
+  await context.runPlatform(job, "douyin");
+  assert.match(job.results.douyin.message, /不是抖音的新建投稿页/);
+  assert.equal(injected.length, 1);
+  assert.equal(sent, 1);
 });

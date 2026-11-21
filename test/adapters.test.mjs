@@ -4,6 +4,7 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { parseHTML, DOMParser } from "linkedom";
+import { pageRole } from "../extension/shared/target.js";
 const {
   outputFiles: [runner],
 } = await build({
@@ -951,6 +952,37 @@ function mountRunner(href, { onAsset, onStatus } = {}) {
     },
   };
 }
+test("抖音现有作品的 iid 在新建任务中保护原视频和封面", async () => {
+  const editor = "https://creator.douyin.com/creator-micro/content/post/video";
+  assert.equal(pageRole(editor).role, "editor");
+  assert.equal(pageRole(editor + "?from=upload").role, "editor");
+  const original = editor + "?iid=7700000000000000123&enter_from=manage";
+  assert.equal(pageRole(original).role, "site");
+  const assetsRead = [];
+  const { document, run } = mountRunner(original, {
+    onAsset: (message) => assetsRead.push(message),
+  });
+  document.body.innerHTML =
+    '<input type="file" accept="video/mp4" disabled><input type="file" accept="image/jpeg"><input placeholder="作品标题" value="原定时作品">';
+  for (const fillOnly of [false, true]) {
+    const { result } = await run({
+      id: "replacement",
+      kind: "video",
+      platform: "douyin",
+      title: "修正版",
+      fillOnly,
+      assets: [
+        { id: "v", role: "video", name: "v.mp4", type: "video/mp4", size: 5 },
+      ],
+    });
+    assert.equal(result.state, "needs_attention");
+    assert.match(result.message, /现有作品/);
+    assert.equal(result.persisted, false);
+  }
+  assert.deepEqual(assetsRead, []);
+  assert.equal(document.querySelector("[placeholder]").value, "原定时作品");
+});
+
 function armCoverDialog(document, opener, confirmText, extras) {
   const names = [];
   opener.onclick = () => {
@@ -2407,6 +2439,348 @@ test("Instagram 选原版并填写配文，不点击分享", async () => {
     document.querySelector("[contenteditable]").textContent,
     /配文正文/,
   );
+});
+
+const tiktokUpload = "https://www.tiktok.com/tiktokstudio/upload";
+
+for (const { query, controls, timezone, verified } of [
+  {
+    query: "",
+    controls: '<input type="date"><input type="time">',
+    timezone: "時區 (UTC+08:00) 台北",
+    verified: true,
+  },
+  {
+    query: "?from=creator_center&tab=video",
+    controls: '<input type="datetime-local" value="">',
+    timezone: "時區 (UTC+09:00)",
+    verified: false,
+  },
+  {
+    query: "?from=webapp&tab=video",
+    controls: '<div role="listbox" aria-label="日期">19 20 21</div>',
+    timezone: "",
+    verified: false,
+  },
+]) {
+  test(`TikTok Studio 原生排程验证 ${timezone || "自定义日历"}`, async () => {
+    const href = tiktokUpload + query;
+    assert.equal(pageRole(href).role, "editor");
+    const { document, run } = mountRunner(href);
+    document.body.innerHTML = '<input type="file" accept="video/mp4">';
+    let submitted = 0;
+    let calendarClicks = 0;
+    document.querySelector("input").onchange = (event) => {
+      assert.equal(event.target.files[0].name, "owned.mp4");
+      document.body.innerHTML = `
+        <section><h2>說明</h2><div contenteditable="true"></div></section>
+        <button>編輯封面</button>
+        <section>
+          <h2>發佈時間</h2>
+          <div role="radio" aria-checked="false">排程</div>
+          <span>${timezone}</span>
+          ${controls}
+        </section>
+        <button id="schedule">排程</button>`;
+      // The Studio editor displays line breaks (Linkedom doesn't apply CSS).
+      const caption = document.querySelector("[contenteditable]");
+      Object.defineProperty(caption, "innerText", {
+        get() {
+          return this.textContent;
+        },
+      });
+      document.querySelector('[role="radio"]').onclick = (event) =>
+        event.target.setAttribute("aria-checked", "true");
+      document.querySelector("#schedule").onclick = () => submitted++;
+      const customCalendar = document.querySelector('[role="listbox"]');
+      if (customCalendar) customCalendar.onclick = () => calendarClicks++;
+    };
+    const at = "2035-11-20T07:00:00+08:00";
+    const { result } = await run({
+      id: "tt-preparation",
+      kind: "video",
+      platform: "tiktok",
+      title: "第一集",
+      description: "第一行\n第二行",
+      aiGenerated: true,
+      assets: [
+        {
+          id: "v",
+          role: "video",
+          name: "owned.mp4",
+          type: "video/mp4",
+          size: 5,
+        },
+      ],
+      schedule: { at },
+    });
+    assert.equal(result.state, "needs_attention", result.message);
+    assert.equal(result.persisted, false);
+    assert.equal(submitted, 0);
+    assert.equal(calendarClicks, 0);
+    assert.equal(
+      document.querySelector("[contenteditable]").textContent,
+      "第一集\n\n第一行\n第二行",
+    );
+    assert.equal(
+      document.querySelector('[role="radio"]').getAttribute("aria-checked"),
+      "true",
+      result.message,
+    );
+    assert.match(result.message, /AI 声明/);
+    if (verified) {
+      assert.equal(result.scheduledAt, at);
+      assert.match(result.evidence, /2035-11-20 07:00 UTC\+08:00/);
+      assert.equal(document.querySelector('[type="date"]').value, "2035-11-20");
+      assert.equal(document.querySelector('[type="time"]').value, "07:00");
+    } else {
+      assert.equal(result.scheduledAt, undefined);
+      assert.equal(result.evidence, undefined);
+      if (timezone) {
+        assert.equal(
+          document.querySelector('[type="datetime-local"]').value,
+          "",
+        );
+        assert.match(result.message, /核对页面时区/);
+      } else assert.match(result.message, /平台日历/);
+    }
+  });
+}
+
+for (const coverLoads of [true, false]) {
+  test(
+    coverLoads
+      ? "TikTok Studio 回读只读日期、时间、AI 声明和保存后的竖封面"
+      : "TikTok Studio 封面没有新预览则保留窗口，避免保存或切换排程",
+    async () => {
+      const source =
+        "https://images.example/cover/48d39542-6439-4654-aa87-0ebb29395ac7.jpg";
+      const assetsRead = [];
+      const { document, run } = mountRunner(tiktokUpload, {
+        onAsset: ({ assetId }) => assetsRead.push(assetId),
+      });
+      const setImage = (img, src) => {
+        img.setAttribute("src", src);
+        Object.defineProperties(img, {
+          complete: { configurable: true, value: true },
+          naturalWidth: { configurable: true, value: 400 },
+        });
+      };
+      const select = (selector) => document.querySelector(selector);
+      const actions = [];
+      document.body.innerHTML = '<input type="file" accept="video/mp4">';
+      select("input").onchange = () => {
+        document.body.innerHTML = `
+      <section><h2>說明</h2><div contenteditable="true"></div></section>
+      <section><button id="cover-open">編輯封面</button><img id="cover-image"></section>
+      <button id="more">顯示更多</button><div id="options"></div>
+      <section>
+        <h2>發佈時間</h2><div role="radio" aria-checked="true">排程</div>
+        <span>時間以 (GMT+8) Singapore 顯示</span>
+        <input id="date" type="text" readonly value="2035-11-19">
+        <input id="time" type="text" readonly value="13:15">
+        <div id="picker"></div>
+      </section>
+      <button id="submit">排程</button>`;
+        const caption = select("[contenteditable]");
+        Object.defineProperty(caption, "innerText", {
+          get() {
+            return this.textContent;
+          },
+        });
+        select("#submit").onclick = () => actions.push("submit");
+        select("#more").onclick = () => {
+          select("#options").innerHTML =
+            '<section><span>AI 產生的內容</span><div role="switch" aria-checked="false"></div></section>';
+          const toggle = select('[role="switch"]');
+          toggle.onclick = () => {
+            document.body.insertAdjacentHTML(
+              "beforeend",
+              '<div role="dialog" id="ai-confirm"><h2>標記由 AI 產生的內容</h2><button>開啟</button></div>',
+            );
+            select("#ai-confirm button").onclick = () => {
+              actions.push("ai");
+              toggle.setAttribute("aria-checked", "true");
+              select("#ai-confirm").remove();
+              select("#options").insertAdjacentHTML(
+                "beforeend",
+                "<p>創作者已標記為由 AI 產生</p>",
+              );
+            };
+          };
+        };
+        const coverEditor = select("#cover-image");
+        setImage(coverEditor, "https://images.example/cover/initial.jpg");
+        select("#cover-open").onclick = () => {
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            `
+        <div role="dialog" id="cover-editor">
+          <button id="chooser">Upload cover image</button>
+          <input type="file" accept="image/png,image/jpeg" hidden>
+          <img id="crop-preview">
+          <button id="save">儲存</button>
+        </div>`,
+          );
+          select("#chooser").onclick = () => actions.push("chooser");
+          select("#cover-editor input").onchange = (event) => {
+            assert.equal(event.target.files[0].name, "portrait.jpg");
+            if (coverLoads)
+              setImage(
+                select("#crop-preview"),
+                "blob:https://www.tiktok.com/preview",
+              );
+          };
+          select("#save").onclick = () => {
+            actions.push("cover");
+            select("#cover-editor").remove();
+            setImage(coverEditor, source);
+          };
+        };
+        const picker = select("#picker");
+        const date = select("#date");
+        date.onclick = () => {
+          picker.innerHTML =
+            '<div role="grid"><button aria-label="2035-10-20">20</button><button aria-label="2035-11-20">20</button></div>';
+          picker.querySelector('[aria-label="2035-10-20"]').onclick = () =>
+            actions.push("wrong-day");
+          picker.querySelector('[aria-label="2035-11-20"]').onclick = () => {
+            actions.push("date");
+            date.value = "2035-11-20";
+            picker.replaceChildren();
+          };
+        };
+        const time = select("#time");
+        time.onclick = () => {
+          const listbox = (length, step) =>
+            `<div role="listbox">${Array.from(
+              { length },
+              (_, index) =>
+                `<span role="option">${String(index * step).padStart(2, "0")}</span>`,
+            ).join("")}</div>`;
+          picker.innerHTML = listbox(24, 1) + listbox(12, 5);
+          for (const option of picker.children[0].children)
+            option.onclick = () => {
+              actions.push("hour");
+              time.value = option.textContent + ":15";
+            };
+          for (const option of picker.children[1].children)
+            option.onclick = () => {
+              actions.push("minute");
+              time.value = time.value.slice(0, 2) + ":" + option.textContent;
+              picker.replaceChildren();
+            };
+        };
+      };
+      const at = "2035-11-20T07:00:00+08:00";
+      const { result } = await run({
+        id: "tt-verified-preparation",
+        kind: "video",
+        platform: "tiktok",
+        title: "第一集",
+        description: "完整說明",
+        aiGenerated: true,
+        assets: [
+          {
+            id: "v",
+            role: "video",
+            name: "owned.mp4",
+            type: "video/mp4",
+            size: 5,
+          },
+          {
+            id: "wide",
+            role: "cover-landscape",
+            name: "wide.jpg",
+            type: "image/jpeg",
+            size: 5,
+          },
+          {
+            id: "portrait",
+            role: "cover-portrait",
+            name: "portrait.jpg",
+            type: "image/jpeg",
+            size: 5,
+          },
+        ],
+        schedule: { at },
+      });
+      assert.equal(result.state, "needs_attention", result.message);
+      assert.equal(result.persisted, false);
+      assert.match(result.evidence, /预览已回读 AI 声明/);
+      assert.deepEqual(assetsRead, ["v", "portrait"]);
+      if (coverLoads) {
+        assert.equal(result.scheduledAt, at, result.message);
+        assert.match(
+          result.evidence,
+          /平台时间字段回读 2035-11-20 07:00 UTC\+08:00/,
+        );
+        assert.match(result.evidence, /已回读保存后的新封面预览/);
+        assert.deepEqual(actions, ["ai", "cover", "date", "hour", "minute"]);
+        assert.equal(select("#cover-image").getAttribute("src"), source);
+      } else {
+        assert.equal(result.scheduledAt, undefined);
+        assert.doesNotMatch(result.evidence, /保存后的新封面/);
+        assert.match(result.message, /未显示所选图片的独立预览/);
+        assert.deepEqual(actions, ["ai"]);
+        assert.ok(select("#cover-editor"));
+        assert.equal(select("#date").value, "2035-11-19");
+        assert.equal(select("#time").value, "13:15");
+      }
+    },
+  );
+}
+
+test("TikTok Studio 新建上传保护现有作品链接与自动提交", async () => {
+  const blocked = [
+    "?post_id=123",
+    "?from=creator_center&tab=video&draft_id=123",
+    "?from=webapp&tab=video&post_id=123",
+    "?from=creator_center&tab=video&tab=video",
+    "?from=other&tab=video",
+    "?from=webapp&tab=video#edit",
+  ].map((query) => tiktokUpload + query);
+  for (const href of blocked) assert.equal(pageRole(href).role, "site");
+  const attempted = [];
+  for (const { href, submit, existing, message } of [
+    ...blocked.map((href) => ({ href, message: /新视频上传页/ })),
+    { href: tiktokUpload, submit: true, message: /原页面确认提交/ },
+    {
+      href: tiktokUpload,
+      existing: '<div contenteditable="true">原视频已填写的说明</div>',
+      message: /已有视频编辑内容/,
+    },
+  ]) {
+    const { document, run } = mountRunner(href, {
+      onAsset: (asset) => attempted.push(asset),
+    });
+    document.body.innerHTML =
+      '<input type="file" accept="video/mp4">' + (existing || "");
+    const { result } = await run({
+      id: "tt-guard",
+      kind: "video",
+      platform: "tiktok",
+      title: "第一集",
+      assets: [
+        {
+          id: "v",
+          role: "video",
+          name: "owned.mp4",
+          type: "video/mp4",
+          size: 5,
+        },
+      ],
+      schedule: { at: "2035-11-20T07:00:00+08:00", submit },
+    });
+    assert.equal(result.state, "needs_attention");
+    assert.match(result.message, message);
+    if (existing)
+      assert.equal(
+        document.querySelector("[contenteditable]").textContent,
+        "原视频已填写的说明",
+      );
+  }
+  assert.deepEqual(attempted, []);
 });
 
 for (const existing of [

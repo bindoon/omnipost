@@ -1,6 +1,6 @@
 ---
 name: omnipost
-description: Draft and fill posts with the local Omnipost CLI and Chrome extension. For videos, prepare platform-native scheduling on Xiaohongshu, WeChat Channels, and Douyin. Native schedule submission requires explicit user authorization.
+description: Draft and fill posts with the local Omnipost CLI and Chrome extension. Prepare platform-native video scheduling on Xiaohongshu, WeChat Channels, Douyin, Bilibili, and TikTok Studio. Native schedule submission requires explicit user authorization and a supported platform.
 ---
 
 # Omnipost
@@ -58,3 +58,5 @@ omnipost video '/绝对路径/video.mp4' \
 小红书或抖音已有明确的定时提交授权时，附上 `--submit-scheduled`，同时保留视频、两张封面、平台文案和实际合集名。先排除作品管理中已有的同一集。只有 `scheduled` 附平台回执才算已提交。`schedule_ready` 表示编辑器已写入时间。`schedule_unconfirmed` 先查作品管理，再判断是否有必要恢复；勿重复投稿。视频号在侧栏填入后由人在原页核对提交。
 
 B 站使用 `--platforms bilibili --schedule-at`，先查 `doctor.nativeBilibiliSchedule`。合集可省略，`--overrides` 的 `bilibili.category` 可指定分区。核对 B 站 4:3 首页封面、16:9 空间封面和原生定时时间后，在投稿页确认提交。
+
+TikTok Studio 使用 `--platforms tiktok --stage --schedule-at`，先查 `doctor.nativeTikTokSchedulePreparation`。在新建上传页从侧栏选择该任务，依次核对视频、说明、竖封面和 AI 声明。定时须在编辑器回读指定日期、时间和 UTC+08:00。日历格没有明确年月日或平台未明示时区时，在原生界面选择并核对。最终在平台提交，确认作品列表中同一集的定时、时区及作品 ID 后再记为已预约。

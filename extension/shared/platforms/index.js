@@ -6,6 +6,7 @@ import douyin from "./douyin.js";
 import bilibili from "./bilibili.js";
 import youtube from "./youtube.js";
 import instagram from "./instagram.js";
+import tiktok from "./tiktok.js";
 
 /**
  * @typedef {object} CopyRules
@@ -39,6 +40,7 @@ import instagram from "./instagram.js";
  * @property {string} caption
  * @property {"direct" | "assist"} automation
  * @property {RegExp[]} [editorPaths]
+ * @property {(url: URL) => boolean} [isExistingWork]
  * @property {string} [worksUrl]
  * @property {Partial<Record<"article" | "video", CopyRules>>} copy
  * @property {number} [categoryMax]
@@ -56,6 +58,7 @@ export const PLATFORMS = Object.fromEntries(
     bilibili,
     youtube,
     instagram,
+    tiktok,
   }).map(([id, rules]) => [id, { ...rules, kinds: Object.keys(rules.copy) }]),
 );
 

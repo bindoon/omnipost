@@ -4,6 +4,7 @@ import {
   canFillCurrent,
   shownMessage,
 } from "./shared/model.js";
+import { replacementAsset } from "./shared/video-replacement.js";
 
 const app = document.querySelector("#app");
 const params = new URLSearchParams(location.search);
@@ -133,6 +134,12 @@ function articleCard(job) {
   const reason = blockReason(job);
   return `<article class="card mt-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><h2 class="text-lg font-semibold leading-snug text-slate-900">${esc(titleOf(job))}</h2>${publishedLine(job)}<p class="mt-2 text-[13px] leading-6 text-slate-600">${esc((job.overrides?.wechat?.description ?? job.description) || "文章正文与配图")}</p>${noteHtml(job)}${reason ? reasonHtml(job, reason) : fillButton(job)}<p class="mt-3 text-xs leading-5 text-slate-500">填充失败时，可在完整工作台复制微信正文粘贴。</p></article>`;
 }
+function replacementCard(job) {
+  const asset = replacementAsset(job, target.platform);
+  if (!asset) return "";
+  const at = job.schedule.at.slice(0, 16).replace("T", " ");
+  return `<article class="card mt-3 rounded-2xl border border-slate-200 bg-white p-4"><h2 class="text-base font-semibold text-slate-900">${esc(titleOf(job))}</h2><p class="mt-1 break-all text-sm text-slate-600">${esc(asset.name)}</p><p class="mt-1 text-sm text-slate-600">${esc(at)}</p><button type="button" class="mt-3 h-10 w-full rounded-xl bg-brand text-sm font-medium text-white" data-replace-video="${esc(job.id)}">用此文件替换视频</button><p class="mt-2 text-sm text-slate-600" role="status"></p></article>`;
+}
 function guideBar() {
   return `<div class="sticky top-0 z-10 -mx-4 -mt-4 mb-4 border-b border-slate-200/80 bg-[#f3f6f4]/95 px-4 py-3 backdrop-blur"><button type="button" class="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left shadow-sm" data-action="workbench"><span class="min-w-0"><span class="block text-sm font-semibold text-slate-900">打开完整工作台</span><small class="mt-0.5 block text-xs font-normal text-slate-500">管理内容、复制正文、删除草稿在那里进行</small></span><span aria-hidden="true" class="text-slate-400">→</span></button></div>`;
 }
@@ -151,6 +158,11 @@ function render() {
     `<header class="mb-1"><h1 class="text-base font-semibold text-slate-900">${text}</h1></header>`;
   if (!target || target.role === "other") {
     app.innerHTML = `${guide}${heading("Omnipost")}${pageError()}<p class="text-sm leading-6 text-slate-500">当前页不是支持的发布页。</p>`;
+    return;
+  }
+  if (target.replacement) {
+    const cards = items.map(replacementCard).join("");
+    app.innerHTML = `${guide}${heading(esc(name) + "原预约换源")}<p class="text-sm leading-6 text-slate-600">选择与当前原稿标题、定时时间一致的替换文件。上传后在原稿核对封面、文案、时间和平台提示，再保存。</p>${pageError()}${cards || '<p class="mt-3 text-sm text-slate-600">请先交接带有原预约时间的替换文件。</p>'}`;
     return;
   }
   if (target.role !== "editor") {
@@ -412,6 +424,19 @@ app.addEventListener("click", async (e) => {
         kind: target.platform === "wechat" ? "article" : "video",
         tabId,
       });
+      return;
+    }
+    if (b.dataset.replaceVideo) {
+      b.disabled = true;
+      const status = b.parentElement?.querySelector('[role="status"]');
+      status.textContent = "正在把视频交给原稿的上传框…";
+      try {
+        await send("REPLACE_VIDEO", { id: b.dataset.replaceVideo, tabId, url: target.url });
+        status.textContent = "文件已交给上传框。请等上传完成，再核对和保存原稿。";
+      } catch (error) {
+        status.textContent = error.message;
+        b.disabled = false;
+      }
       return;
     }
     if (b.dataset.replaceId) {

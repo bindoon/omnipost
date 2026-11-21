@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import vm from "node:vm";
 import * as model from "../extension/shared/model.js";
 import * as target from "../extension/shared/target.js";
+import * as replacement from "../extension/shared/video-replacement.js";
 import {
   NATIVE_SCHEDULE_CAPABILITY,
   PLATFORM_SCHEDULE_CAPABILITIES,
@@ -70,6 +71,7 @@ test("保存过令牌后会自动连接，空令牌也能再次连接", async (t
   vm.runInNewContext(source, {
     ...model,
     ...target,
+    ...replacement,
     NATIVE_SCHEDULE_CAPABILITY,
     PLATFORM_SCHEDULE_CAPABILITIES,
     chrome: {
